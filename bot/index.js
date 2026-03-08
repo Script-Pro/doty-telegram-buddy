@@ -74,6 +74,7 @@ bot.onText(/\/start/, (msg) => {
           { text: '🔄 UPDATE', callback_data: 'update_script' },
         ],
         [
+          { text: '👥 ADMINS', callback_data: 'menu_admin' },
           { text: '📑 SERVER INFO', callback_data: 'server_info' },
         ],
       ],
@@ -102,7 +103,7 @@ bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const data = query.data;
 
-  if (!isAdmin(query.from.id)) {
+  if (!isAdminUser(query.from.id)) {
     bot.answerCallbackQuery(query.id, { text: '⛔ Accès refusé.' });
     return;
   }
@@ -210,7 +211,7 @@ const pendingActions = {};
 
 bot.on('message', (msg) => {
   if (msg.text && msg.text.startsWith('/')) return; // Skip commands
-  if (!isAdmin(msg.from.id)) return;
+  if (!isAdminUser(msg.from.id)) return;
 
   const chatId = msg.chat.id;
   const pending = pendingActions[chatId];
