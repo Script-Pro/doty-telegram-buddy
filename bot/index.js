@@ -18,12 +18,27 @@ const zivpnHandler = require('./handlers/zivpn');
 const udpHandler = require('./handlers/udp');
 const netguardHandler = require('./handlers/netguard');
 const adminHandler = require('./handlers/admin');
+const statsHandler = require('./handlers/stats');
+const autoexpireHandler = require('./handlers/autoexpire');
+const broadcastHandler = require('./handlers/broadcast');
+const speedtestHandler = require('./handlers/speedtest');
+const firewallHandler = require('./handlers/firewall');
+const multiserverHandler = require('./handlers/multiserver');
+const trialHandler = require('./handlers/trial');
+const qrcodeHandler = require('./handlers/qrcode');
+const monitorHandler = require('./handlers/monitor');
+const auditHandler = require('./handlers/audit');
+
 const { isAdminUser } = adminHandler;
 
 // Create bot
 const bot = new TelegramBot(config.BOT_TOKEN, { polling: true });
 
 console.log('🐱 DOTYCAT TUNNEL Bot started!');
+
+// Initialize auto-start modules
+autoexpireHandler.init(bot);
+monitorHandler.init(bot);
 
 // Auth middleware - uses multi-admin system
 function authMiddleware(msg) {
@@ -74,6 +89,26 @@ bot.onText(/\/start/, (msg) => {
           { text: '🔄 UPDATE', callback_data: 'update_script' },
         ],
         [
+          { text: '📊 STATS', callback_data: 'menu_stats' },
+          { text: '⏰ AUTO-EXPIRE', callback_data: 'menu_autoexpire' },
+        ],
+        [
+          { text: '📢 BROADCAST', callback_data: 'menu_broadcast' },
+          { text: '🧪 SPEEDTEST', callback_data: 'menu_speedtest' },
+        ],
+        [
+          { text: '🔐 FIREWALL', callback_data: 'menu_firewall' },
+          { text: '📦 MULTI-SERVER', callback_data: 'menu_multiserver' },
+        ],
+        [
+          { text: '🕐 TRIAL', callback_data: 'menu_trial' },
+          { text: '📱 QR CODE', callback_data: 'menu_qrcode' },
+        ],
+        [
+          { text: '🛡️ MONITOR', callback_data: 'menu_monitor' },
+          { text: '📋 AUDIT', callback_data: 'menu_audit' },
+        ],
+        [
           { text: '👥 ADMINS', callback_data: 'menu_admin' },
           { text: '📑 SERVER INFO', callback_data: 'server_info' },
         ],
@@ -98,6 +133,9 @@ bot.onText(/\/menu/, (msg) => {
   bot.emit('text', '/start', msg);
 });
 
+// Handle text messages for interactive flows
+const pendingActions = {};
+
 // Handle callback queries (button presses)
 bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
@@ -112,56 +150,72 @@ bot.on('callback_query', async (query) => {
 
   try {
     // Main menus
-    if (data === 'menu_vless') return vlessHandler.showMenu(bot, chatId);
-    if (data === 'menu_vmess') return vmessHandler.showMenu(bot, chatId);
-    if (data === 'menu_trojan') return trojanHandler.showMenu(bot, chatId);
-    if (data === 'menu_socks') return socksHandler.showMenu(bot, chatId);
-    if (data === 'menu_ssh') return sshHandler.showMenu(bot, chatId);
-    if (data === 'menu_openvpn') return openvpnHandler.showMenu(bot, chatId);
-    if (data === 'menu_domain') return domainHandler.showMenu(bot, chatId);
-    if (data === 'menu_dns') return dnsHandler.showMenu(bot, chatId);
-    if (data === 'menu_port') return portHandler.showMenu(bot, chatId);
-    if (data === 'menu_status') return statusHandler.showMenu(bot, chatId);
-    if (data === 'menu_log') return logHandler.showMenu(bot, chatId);
-    if (data === 'menu_backup') return backupHandler.showMenu(bot, chatId);
-    if (data === 'menu_netguard') return netguardHandler.showMenu(bot, chatId);
-    if (data === 'menu_zivpn') return zivpnHandler.showMenu(bot, chatId);
-    if (data === 'menu_udp') return udpHandler.showMenu(bot, chatId);
-    if (data === 'menu_admin') return adminHandler.showMenu(bot, chatId, query.from.id);
+    const menus = {
+      menu_vless: () => vlessHandler.showMenu(bot, chatId),
+      menu_vmess: () => vmessHandler.showMenu(bot, chatId),
+      menu_trojan: () => trojanHandler.showMenu(bot, chatId),
+      menu_socks: () => socksHandler.showMenu(bot, chatId),
+      menu_ssh: () => sshHandler.showMenu(bot, chatId),
+      menu_openvpn: () => openvpnHandler.showMenu(bot, chatId),
+      menu_domain: () => domainHandler.showMenu(bot, chatId),
+      menu_dns: () => dnsHandler.showMenu(bot, chatId),
+      menu_port: () => portHandler.showMenu(bot, chatId),
+      menu_status: () => statusHandler.showMenu(bot, chatId),
+      menu_log: () => logHandler.showMenu(bot, chatId),
+      menu_backup: () => backupHandler.showMenu(bot, chatId),
+      menu_netguard: () => netguardHandler.showMenu(bot, chatId),
+      menu_zivpn: () => zivpnHandler.showMenu(bot, chatId),
+      menu_udp: () => udpHandler.showMenu(bot, chatId),
+      menu_admin: () => adminHandler.showMenu(bot, chatId, query.from.id),
+      menu_stats: () => statsHandler.showMenu(bot, chatId),
+      menu_autoexpire: () => autoexpireHandler.showMenu(bot, chatId),
+      menu_broadcast: () => broadcastHandler.showMenu(bot, chatId),
+      menu_speedtest: () => speedtestHandler.showMenu(bot, chatId),
+      menu_firewall: () => firewallHandler.showMenu(bot, chatId),
+      menu_multiserver: () => multiserverHandler.showMenu(bot, chatId),
+      menu_trial: () => trialHandler.showMenu(bot, chatId),
+      menu_qrcode: () => qrcodeHandler.showMenu(bot, chatId),
+      menu_monitor: () => monitorHandler.showMenu(bot, chatId),
+      menu_audit: () => auditHandler.showMenu(bot, chatId),
+    };
 
-    // Admin sub-actions
-    if (data.startsWith('admin_')) return adminHandler.handleCallback(bot, chatId, data, query, pendingActions);
+    if (menus[data]) return menus[data]();
 
-    // VLESS sub-actions
-    if (data.startsWith('vless_')) return vlessHandler.handleCallback(bot, chatId, data, query);
-    // VMESS sub-actions
-    if (data.startsWith('vmess_')) return vmessHandler.handleCallback(bot, chatId, data, query);
-    // TROJAN sub-actions
-    if (data.startsWith('trojan_')) return trojanHandler.handleCallback(bot, chatId, data, query);
-    // SOCKS sub-actions
-    if (data.startsWith('socks_')) return socksHandler.handleCallback(bot, chatId, data, query);
-    // SSH sub-actions
-    if (data.startsWith('ssh_')) return sshHandler.handleCallback(bot, chatId, data, query);
-    // OpenVPN sub-actions
-    if (data.startsWith('ovpn_')) return openvpnHandler.handleCallback(bot, chatId, data, query);
-    // Domain sub-actions
-    if (data.startsWith('domain_')) return domainHandler.handleCallback(bot, chatId, data, query);
-    // DNS sub-actions
-    if (data.startsWith('dns_')) return dnsHandler.handleCallback(bot, chatId, data, query);
-    // Port sub-actions
-    if (data.startsWith('port_')) return portHandler.handleCallback(bot, chatId, data, query);
-    // Status sub-actions
-    if (data.startsWith('status_')) return statusHandler.handleCallback(bot, chatId, data, query);
-    // Log sub-actions
-    if (data.startsWith('log_')) return logHandler.handleCallback(bot, chatId, data, query);
-    // Backup sub-actions
-    if (data.startsWith('backup_')) return backupHandler.handleCallback(bot, chatId, data, query);
-    // NetGuard sub-actions
-    if (data.startsWith('netguard_')) return netguardHandler.handleCallback(bot, chatId, data, query);
-    // ZIVPN sub-actions
-    if (data.startsWith('zivpn_')) return zivpnHandler.handleCallback(bot, chatId, data, query);
-    // UDP sub-actions
-    if (data.startsWith('udp_')) return udpHandler.handleCallback(bot, chatId, data, query);
+    // Sub-action routing by prefix
+    const prefixHandlers = [
+      ['admin_', adminHandler],
+      ['vless_', vlessHandler],
+      ['vmess_', vmessHandler],
+      ['trojan_', trojanHandler],
+      ['socks_', socksHandler],
+      ['ssh_', sshHandler],
+      ['ovpn_', openvpnHandler],
+      ['domain_', domainHandler],
+      ['dns_', dnsHandler],
+      ['port_', portHandler],
+      ['status_', statusHandler],
+      ['log_', logHandler],
+      ['backup_', backupHandler],
+      ['netguard_', netguardHandler],
+      ['zivpn_', zivpnHandler],
+      ['udp_', udpHandler],
+      ['stats_', statsHandler],
+      ['autoexp_', autoexpireHandler],
+      ['broadcast_', broadcastHandler],
+      ['speed_', speedtestHandler],
+      ['fw_', firewallHandler],
+      ['ms_', multiserverHandler],
+      ['trial_', trialHandler],
+      ['qr_', qrcodeHandler],
+      ['mon_', monitorHandler],
+      ['audit_', auditHandler],
+    ];
+
+    for (const [prefix, handler] of prefixHandlers) {
+      if (data.startsWith(prefix)) {
+        return handler.handleCallback(bot, chatId, data, query, pendingActions);
+      }
+    }
 
     // Server info
     if (data === 'server_info') {
@@ -210,11 +264,8 @@ bot.on('callback_query', async (query) => {
   }
 });
 
-// Handle text messages for interactive flows (create account, etc.)
-const pendingActions = {};
-
 bot.on('message', (msg) => {
-  if (msg.text && msg.text.startsWith('/')) return; // Skip commands
+  if (msg.text && msg.text.startsWith('/')) return;
   if (!isAdminUser(msg.from.id)) return;
 
   const chatId = msg.chat.id;
