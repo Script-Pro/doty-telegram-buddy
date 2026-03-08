@@ -2,6 +2,7 @@ const { runCommand, getDomain } = require('../utils/exec');
 const { generateUUID, getExpiryDate, adjustExpiry } = require('../utils/helpers');
 const { paginatedKeyboard, getPageFromCallback } = require('../utils/pagination');
 const { getXrayTraffic, formatBytes, parseLimitToBytes, setDataLimit, getDataLimit, removeDataLimit, setConnLimit, getConnLimit } = require('../utils/traffic');
+const { autoDeleteSend } = require('../utils/autodelete');
 
 const USERS_DB = '/etc/xray/users';
 const PROTO = 'vless';
@@ -56,7 +57,7 @@ async function handleCallback(bot, chatId, data, query, pendingActions) {
   switch (data) {
     case 'vless_create':
       editOrSend(bot, chatId, msgId, '📝 Nom d\'utilisateur VLESS:');
-      pendingActions[chatId] = { action: 'vless_create', step: 'username', handler: handleCreateFlow };
+      pendingActions[chatId] = { action: 'vless_create', step: 'username', handler: handleCreateFlow, fromId: query.from.id, fromName: query.from.first_name || query.from.username || String(query.from.id) };
       break;
     case 'vless_modify': await showPaginatedList(bot, chatId, msgId, 'vless_mod_', 'vless_pgm_', 0); break;
     case 'vless_delete': await showPaginatedList(bot, chatId, msgId, 'vless_del_', 'vless_pgl_', 0); break;
@@ -135,35 +136,36 @@ async function showPaginatedList(bot, chatId, msgId, prefix, pagePrefix, page) {
 }
 
 async function handleCreateFlow(bot, chatId, text, pending, pendingActions) {
-  if (pending.step === 'username') { pending.username = text.trim(); pending.step = 'days'; bot.sendMessage(chatId, '📅 Durée (en jours):'); }
+  if (pending.step === 'username') { pending.username = text.trim(); pending.step = 'days'; autoDeleteSend(bot, chatId, '📅 Durée (en jours):'); }
   else if (pending.step === 'days') {
     const days = parseInt(text);
-    if (isNaN(days) || days < 1) { bot.sendMessage(chatId, '❌ Invalide.'); delete pendingActions[chatId]; return; }
+    if (isNaN(days) || days < 1) { autoDeleteSend(bot, chatId, '❌ Invalide.'); delete pendingActions[chatId]; return; }
     pending.step = 'connlimit'; pending.days = days;
-    bot.sendMessage(chatId, '🔢 Limite de connexions simultanées (0 = illimité):');
+    autoDeleteSend(bot, chatId, '🔢 Limite de connexions simultanées (0 = illimité):');
   }
   else if (pending.step === 'connlimit') {
     const limit = parseInt(text);
-    if (isNaN(limit) || limit < 0) { bot.sendMessage(chatId, '❌ Invalide.'); delete pendingActions[chatId]; return; }
+    if (isNaN(limit) || limit < 0) { autoDeleteSend(bot, chatId, '❌ Invalide.'); delete pendingActions[chatId]; return; }
     pending.connLimit = limit; pending.step = 'datalimit';
-    bot.sendMessage(chatId, '📦 Limite de données (ex: `5GB`, `500MB`, `0` = illimité):', { parse_mode: 'Markdown' });
+    autoDeleteSend(bot, chatId, '📦 Limite de données (ex: `5GB`, `500MB`, `0` = illimité):', { parse_mode: 'Markdown' });
   }
   else if (pending.step === 'datalimit') {
     delete pendingActions[chatId];
     let dataLimitBytes = 0;
-    if (text.trim() !== '0') { dataLimitBytes = parseLimitToBytes(text.trim()); if (dataLimitBytes === null) { bot.sendMessage(chatId, '❌ Format invalide.'); return; } }
-    await createUser(bot, chatId, pending.username, pending.days, pending.connLimit, dataLimitBytes);
+    if (text.trim() !== '0') { dataLimitBytes = parseLimitToBytes(text.trim()); if (dataLimitBytes === null) { autoDeleteSend(bot, chatId, '❌ Format invalide.'); return; } }
+    await createUser(bot, chatId, pending.username, pending.days, pending.connLimit, dataLimitBytes, pending.fromId, pending.fromName);
   }
 }
 
-async function createUser(bot, chatId, username, days, connLimit, dataLimitBytes) {
+async function createUser(bot, chatId, username, days, connLimit, dataLimitBytes, createdById, createdByName) {
   try {
     const uuid = generateUUID();
     const expiry = getExpiryDate(days);
     const domain = await getDomain();
     await runCommand(`mkdir -p ${USERS_DB}`);
     await runCommand(`cd /etc/xray && jq '.inbounds[${INBOUND_INDEX}].settings.clients += [{"id":"${uuid}","email":"${username}"}]' config.json > tmp.json && mv tmp.json config.json`);
-    await runCommand(`echo '${JSON.stringify({ username, uuid, expiry, protocol: PROTO, locked: false, connLimit, dataLimit: dataLimitBytes })}' > ${USERS_DB}/${username}.json`);
+    const userInfo = { username, uuid, expiry, protocol: PROTO, locked: false, connLimit, dataLimit: dataLimitBytes, createdBy: createdByName || String(createdById || 'unknown'), createdById: createdById || null };
+    await runCommand(`echo '${JSON.stringify(userInfo)}' > ${USERS_DB}/${username}.json`);
     await runCommand('systemctl restart xray');
     if (connLimit > 0) await setConnLimit(PROTO, username, connLimit);
     if (dataLimitBytes > 0) await setDataLimit(PROTO, username, dataLimitBytes);
@@ -173,7 +175,7 @@ async function createUser(bot, chatId, username, days, connLimit, dataLimitBytes
     const grpcLink = `vless://${uuid}@${domain}:443?type=grpc&security=tls&serviceName=vless-grpc&sni=${domain}#${username}_gRPC`;
 
     bot.sendMessage(chatId,
-      `━━━━━━━━━━━━━━━━━━━━━\n✅ *VLESS Account Created*\n━━━━━━━━━━━━━━━━━━━━━\n👤 User: \`${username}\`\n🔑 UUID: \`${uuid}\`\n🌐 Domain: \`${domain}\`\n📅 Expiry: \`${expiry}\`\n🔢 Max Conn: ${connLimit || '♾ Illimité'}\n📦 Quota: ${dataLimitBytes ? formatBytes(dataLimitBytes) : '♾ Illimité'}\n━━━━━━━━━━━━━━━━━━━━━\n🔗 *WS TLS:*\n\`${wsLink}\`\n\n🔗 *WS Non-TLS:*\n\`${wsNtls}\`\n\n🔗 *gRPC:*\n\`${grpcLink}\`\n━━━━━━━━━━━━━━━━━━━━━`,
+      `━━━━━━━━━━━━━━━━━━━━━\n✅ *VLESS Account Created*\n━━━━━━━━━━━━━━━━━━━━━\n👤 User: \`${username}\`\n🔑 UUID: \`${uuid}\`\n🌐 Domain: \`${domain}\`\n📅 Expiry: \`${expiry}\`\n🔢 Max Conn: ${connLimit || '♾'}\n📦 Quota: ${dataLimitBytes ? formatBytes(dataLimitBytes) : '♾'}\n👷 Créé par: ${createdByName || createdById}\n━━━━━━━━━━━━━━━━━━━━━\n🔗 *WS TLS:*\n\`${wsLink}\`\n\n🔗 *WS Non-TLS:*\n\`${wsNtls}\`\n\n🔗 *gRPC:*\n\`${grpcLink}\`\n━━━━━━━━━━━━━━━━━━━━━`,
       { parse_mode: 'Markdown' }
     );
   } catch (err) { bot.sendMessage(chatId, `❌ Erreur: ${err.message}`); }
@@ -247,8 +249,9 @@ async function showDetail(bot, chatId, msgId, username) {
     const limit = await getDataLimit(PROTO, username);
     const conn = await getConnLimit(PROTO, username);
     const traffic = await getXrayTraffic(username);
+    const createdBy = info.createdBy || 'N/A';
     editOrSend(bot, chatId, msgId,
-      `━━━━━━━━━━━━━━━━━━━━━\n🔍 *VLESS: ${username}*\n━━━━━━━━━━━━━━━━━━━━━\n🔑 UUID: \`${info.uuid}\`\n🌐 Domain: \`${domain}\`\n📅 Expiry: \`${info.expiry}\`\n🔒 Locked: ${info.locked ? 'Oui' : 'Non'}\n🔢 Max Conn: ${conn ? conn.maxConn : '♾'}\n📦 Quota: ${limit ? formatBytes(limit.limitBytes) : '♾'}\n📊 Trafic: ↑${formatBytes(traffic.uplink)} ↓${formatBytes(traffic.downlink)}\n━━━━━━━━━━━━━━━━━━━━━`,
+      `━━━━━━━━━━━━━━━━━━━━━\n🔍 *VLESS: ${username}*\n━━━━━━━━━━━━━━━━━━━━━\n🔑 UUID: \`${info.uuid}\`\n🌐 Domain: \`${domain}\`\n📅 Expiry: \`${info.expiry}\`\n🔒 Locked: ${info.locked ? 'Oui' : 'Non'}\n🔢 Max Conn: ${conn ? conn.maxConn : '♾'}\n📦 Quota: ${limit ? formatBytes(limit.limitBytes) : '♾'}\n📊 Trafic: ↑${formatBytes(traffic.uplink)} ↓${formatBytes(traffic.downlink)}\n👷 Créé par: ${createdBy}\n━━━━━━━━━━━━━━━━━━━━━`,
       { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🔙 Retour', callback_data: `menu_${PROTO}` }]] } }
     );
   } catch (err) { editOrSend(bot, chatId, msgId, `❌ Erreur: ${err.message}`); }
@@ -279,19 +282,19 @@ async function showTraffic(bot, chatId, msgId, username) {
 
 async function handleQuotaFlow(bot, chatId, text, pending, pendingActions) {
   delete pendingActions[chatId];
-  if (text.trim() === '0') { await removeDataLimit(PROTO, pending.user); bot.sendMessage(chatId, `✅ Quota supprimé pour *${pending.user}*`, { parse_mode: 'Markdown' }); return; }
+  if (text.trim() === '0') { await removeDataLimit(PROTO, pending.user); autoDeleteSend(bot, chatId, `✅ Quota supprimé pour *${pending.user}*`, { parse_mode: 'Markdown' }); return; }
   const bytes = parseLimitToBytes(text.trim());
-  if (!bytes) { bot.sendMessage(chatId, '❌ Format invalide.'); return; }
+  if (!bytes) { autoDeleteSend(bot, chatId, '❌ Format invalide.'); return; }
   await setDataLimit(PROTO, pending.user, bytes);
-  bot.sendMessage(chatId, `✅ Quota *${pending.user}*: ${formatBytes(bytes)}`, { parse_mode: 'Markdown' });
+  autoDeleteSend(bot, chatId, `✅ Quota *${pending.user}*: ${formatBytes(bytes)}`, { parse_mode: 'Markdown' });
 }
 
 async function handleConnLimitFlow(bot, chatId, text, pending, pendingActions) {
   delete pendingActions[chatId];
   const max = parseInt(text);
-  if (isNaN(max) || max < 0) { bot.sendMessage(chatId, '❌ Invalide.'); return; }
+  if (isNaN(max) || max < 0) { autoDeleteSend(bot, chatId, '❌ Invalide.'); return; }
   await setConnLimit(PROTO, pending.user, max);
-  bot.sendMessage(chatId, `✅ Limite connexions *${pending.user}*: ${max || '♾'}`, { parse_mode: 'Markdown' });
+  autoDeleteSend(bot, chatId, `✅ Limite connexions *${pending.user}*: ${max || '♾'}`, { parse_mode: 'Markdown' });
 }
 
 module.exports = { showMenu, handleCallback };

@@ -2,8 +2,10 @@ const { runCommand, getDomain } = require('../utils/exec');
 const { getExpiryDate, adjustExpiry } = require('../utils/helpers');
 const { paginatedKeyboard, getPageFromCallback } = require('../utils/pagination');
 const { formatBytes, parseLimitToBytes, setDataLimit, getDataLimit, removeDataLimit, setConnLimit, getConnLimit } = require('../utils/traffic');
+const { autoDeleteSend, scheduleDelete } = require('../utils/autodelete');
 
 const USERS_DB = '/etc/zivpn/users';
+const ZIVPN_CONFIG = '/etc/zivpn/config.json';
 const PROTO = 'zivpn';
 
 function showMenu(bot, chatId, msgId) {
@@ -38,6 +40,30 @@ async function getUsers() {
   } catch { return []; }
 }
 
+/** Add password to ZiVPN config.json auth.config array */
+async function addToZivpnConfig(password) {
+  try {
+    await runCommand(`jq '.auth.config += ["${password}"]' ${ZIVPN_CONFIG} > /tmp/zivpn_tmp.json && mv /tmp/zivpn_tmp.json ${ZIVPN_CONFIG}`);
+    await runCommand('systemctl restart zivpn 2>/dev/null || true');
+  } catch {}
+}
+
+/** Remove password from ZiVPN config.json auth.config array */
+async function removeFromZivpnConfig(password) {
+  try {
+    await runCommand(`jq '.auth.config -= ["${password}"]' ${ZIVPN_CONFIG} > /tmp/zivpn_tmp.json && mv /tmp/zivpn_tmp.json ${ZIVPN_CONFIG}`);
+    await runCommand('systemctl restart zivpn 2>/dev/null || true');
+  } catch {}
+}
+
+/** Update password in ZiVPN config.json auth.config array */
+async function updateZivpnConfigPassword(oldPass, newPass) {
+  try {
+    await runCommand(`jq '(.auth.config[] | select(. == "${oldPass}")) = "${newPass}"' ${ZIVPN_CONFIG} > /tmp/zivpn_tmp.json && mv /tmp/zivpn_tmp.json ${ZIVPN_CONFIG}`);
+    await runCommand('systemctl restart zivpn 2>/dev/null || true');
+  } catch {}
+}
+
 async function handleCallback(bot, chatId, data, query, pendingActions) {
   const msgId = query?.message?.message_id;
   const P = 'zivpn';
@@ -53,7 +79,7 @@ async function handleCallback(bot, chatId, data, query, pendingActions) {
   switch (data) {
     case `${P}_create`:
       editOrSend(bot, chatId, msgId, '📝 Nom d\'utilisateur ZIVPN:');
-      pendingActions[chatId] = { action: `${P}_create`, step: 'username', handler: handleCreateFlow };
+      pendingActions[chatId] = { action: `${P}_create`, step: 'username', handler: handleCreateFlow, fromId: query.from.id, fromName: query.from.first_name || query.from.username || String(query.from.id) };
       break;
     case `${P}_modify`: await showPaginatedList(bot, chatId, msgId, `${P}_mod_`, `${P}_pgm_`, 0); break;
     case `${P}_delete`: await showPaginatedList(bot, chatId, msgId, `${P}_del_`, `${P}_pgl_`, 0); break;
@@ -81,7 +107,7 @@ async function handleCallback(bot, chatId, data, query, pendingActions) {
       break;
     case `${P}_config`:
       try {
-        const config = await runCommand('cat /etc/zivpn/config.json 2>/dev/null || echo "Config non trouvée"');
+        const config = await runCommand(`cat ${ZIVPN_CONFIG} 2>/dev/null || echo "Config non trouvée"`);
         editOrSend(bot, chatId, msgId, `⚙️ *ZIVPN Config:*\n\`\`\`json\n${config}\n\`\`\``, {
           parse_mode: 'Markdown',
           reply_markup: { inline_keyboard: [[{ text: '🔙 Retour', callback_data: `menu_${P}` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] }
@@ -159,40 +185,43 @@ async function showPaginatedList(bot, chatId, msgId, prefix, pagePrefix, page) {
 }
 
 async function handleCreateFlow(bot, chatId, text, pending, pendingActions) {
-  if (pending.step === 'username') { pending.username = text.trim(); pending.step = 'password'; bot.sendMessage(chatId, '🔑 Mot de passe:'); }
-  else if (pending.step === 'password') { pending.password = text.trim(); pending.step = 'days'; bot.sendMessage(chatId, '📅 Durée (jours):'); }
+  if (pending.step === 'username') { pending.username = text.trim(); pending.step = 'password'; autoDeleteSend(bot, chatId, '🔑 Mot de passe:'); }
+  else if (pending.step === 'password') { pending.password = text.trim(); pending.step = 'days'; autoDeleteSend(bot, chatId, '📅 Durée (jours):'); }
   else if (pending.step === 'days') {
     const days = parseInt(text);
-    if (isNaN(days) || days < 1) { bot.sendMessage(chatId, '❌ Invalide.'); delete pendingActions[chatId]; return; }
+    if (isNaN(days) || days < 1) { autoDeleteSend(bot, chatId, '❌ Invalide.'); delete pendingActions[chatId]; return; }
     pending.days = days; pending.step = 'connlimit';
-    bot.sendMessage(chatId, '🔢 Limite connexions (0 = illimité):');
+    autoDeleteSend(bot, chatId, '🔢 Limite connexions (0 = illimité):');
   }
   else if (pending.step === 'connlimit') {
     const limit = parseInt(text);
-    if (isNaN(limit) || limit < 0) { bot.sendMessage(chatId, '❌ Invalide.'); delete pendingActions[chatId]; return; }
+    if (isNaN(limit) || limit < 0) { autoDeleteSend(bot, chatId, '❌ Invalide.'); delete pendingActions[chatId]; return; }
     pending.connLimit = limit; pending.step = 'datalimit';
-    bot.sendMessage(chatId, '📦 Limite données (ex: `5GB`, `0` = illimité):', { parse_mode: 'Markdown' });
+    autoDeleteSend(bot, chatId, '📦 Limite données (ex: `5GB`, `0` = illimité):', { parse_mode: 'Markdown' });
   }
   else if (pending.step === 'datalimit') {
     delete pendingActions[chatId];
     let dataLimitBytes = 0;
-    if (text.trim() !== '0') { dataLimitBytes = parseLimitToBytes(text.trim()); if (dataLimitBytes === null) { bot.sendMessage(chatId, '❌ Format invalide.'); return; } }
-    await createUser(bot, chatId, pending.username, pending.password, pending.days, pending.connLimit, dataLimitBytes);
+    if (text.trim() !== '0') { dataLimitBytes = parseLimitToBytes(text.trim()); if (dataLimitBytes === null) { autoDeleteSend(bot, chatId, '❌ Format invalide.'); return; } }
+    await createUser(bot, chatId, pending.username, pending.password, pending.days, pending.connLimit, dataLimitBytes, pending.fromId, pending.fromName);
   }
 }
 
-async function createUser(bot, chatId, username, password, days, connLimit, dataLimitBytes) {
+async function createUser(bot, chatId, username, password, days, connLimit, dataLimitBytes, createdById, createdByName) {
   try {
     const expiry = getExpiryDate(days);
     const domain = await getDomain();
     await runCommand(`mkdir -p ${USERS_DB}`);
-    await runCommand(`echo '${JSON.stringify({ username, password, expiry, locked: false, connLimit, dataLimit: dataLimitBytes })}' > ${USERS_DB}/${username}.json`);
+    // Save user info JSON
+    const userInfo = { username, password, expiry, locked: false, connLimit, dataLimit: dataLimitBytes, createdBy: createdByName || String(createdById || 'unknown'), createdById: createdById || null };
+    await runCommand(`echo '${JSON.stringify(userInfo)}' > ${USERS_DB}/${username}.json`);
+    // Add password to ZiVPN config.json auth.config array
+    await addToZivpnConfig(password);
     if (connLimit > 0) await setConnLimit(PROTO, username, connLimit);
     if (dataLimitBytes > 0) await setDataLimit(PROTO, username, dataLimitBytes);
-    await runCommand('systemctl restart zivpn 2>/dev/null || true');
 
     bot.sendMessage(chatId,
-      `━━━━━━━━━━━━━━━━━━━━━\n✅ *ZIVPN Account Created*\n━━━━━━━━━━━━━━━━━━━━━\n👤 User: \`${username}\`\n🔑 Pass: \`${password}\`\n🌐 Domain: \`${domain}\`\n📅 Expiry: \`${expiry}\`\n🔢 Max Conn: ${connLimit || '♾'}\n📦 Quota: ${dataLimitBytes ? formatBytes(dataLimitBytes) : '♾'}\n━━━━━━━━━━━━━━━━━━━━━\n📡 Port: 5667 UDP\n━━━━━━━━━━━━━━━━━━━━━`,
+      `━━━━━━━━━━━━━━━━━━━━━\n✅ *ZIVPN Account Created*\n━━━━━━━━━━━━━━━━━━━━━\n👤 User: \`${username}\`\n🔑 Pass: \`${password}\`\n🌐 Domain: \`${domain}\`\n📅 Expiry: \`${expiry}\`\n🔢 Max Conn: ${connLimit || '♾'}\n📦 Quota: ${dataLimitBytes ? formatBytes(dataLimitBytes) : '♾'}\n👷 Créé par: ${createdByName || createdById}\n━━━━━━━━━━━━━━━━━━━━━\n📡 Port: 5667 UDP\n━━━━━━━━━━━━━━━━━━━━━`,
       { parse_mode: 'Markdown' }
     );
   } catch (err) { bot.sendMessage(chatId, `❌ Erreur: ${err.message}`); }
@@ -205,23 +234,27 @@ async function handleModifyUsername(bot, chatId, text, pending, pendingActions) 
     const newUser = text.trim();
     info.username = newUser;
     await runCommand(`echo '${JSON.stringify(info)}' > ${USERS_DB}/${newUser}.json && rm -f ${USERS_DB}/${pending.user}.json`);
-    bot.sendMessage(chatId, `✅ *${pending.user}* → *${newUser}*`, { parse_mode: 'Markdown' });
-  } catch (err) { bot.sendMessage(chatId, `❌ Erreur: ${err.message}`); }
+    autoDeleteSend(bot, chatId, `✅ *${pending.user}* → *${newUser}*`, { parse_mode: 'Markdown' });
+  } catch (err) { autoDeleteSend(bot, chatId, `❌ Erreur: ${err.message}`); }
 }
 
 async function handleModifyPassword(bot, chatId, text, pending, pendingActions) {
   delete pendingActions[chatId];
   try {
+    const info = JSON.parse(await runCommand(`cat ${USERS_DB}/${pending.user}.json`));
+    const oldPass = info.password;
     const newPass = text.trim();
+    // Update in ZiVPN config
+    await updateZivpnConfigPassword(oldPass, newPass);
     await runCommand(`jq '.password = "${newPass}"' ${USERS_DB}/${pending.user}.json > /tmp/tmp.json && mv /tmp/tmp.json ${USERS_DB}/${pending.user}.json`);
-    bot.sendMessage(chatId, `✅ Password de *${pending.user}* mis à jour.`, { parse_mode: 'Markdown' });
-  } catch (err) { bot.sendMessage(chatId, `❌ Erreur: ${err.message}`); }
+    autoDeleteSend(bot, chatId, `✅ Password de *${pending.user}* mis à jour.`, { parse_mode: 'Markdown' });
+  } catch (err) { autoDeleteSend(bot, chatId, `❌ Erreur: ${err.message}`); }
 }
 
 async function handleRenewFlow(bot, chatId, text, pending, pendingActions) {
   delete pendingActions[chatId];
   const amount = parseInt(text);
-  if (isNaN(amount) || amount < 1) { bot.sendMessage(chatId, '❌ Invalide.'); return; }
+  if (isNaN(amount) || amount < 1) { autoDeleteSend(bot, chatId, '❌ Invalide.'); return; }
   try {
     const info = JSON.parse(await runCommand(`cat ${USERS_DB}/${pending.user}.json`));
     const unitMap = { d: 'days', h: 'hours', m: 'minutes' };
@@ -229,12 +262,15 @@ async function handleRenewFlow(bot, chatId, text, pending, pendingActions) {
     const newExpiry = adjustExpiry(info.expiry, finalAmount, unitMap[pending.unit]);
     await runCommand(`jq '.expiry = "${newExpiry}"' ${USERS_DB}/${pending.user}.json > /tmp/tmp.json && mv /tmp/tmp.json ${USERS_DB}/${pending.user}.json`);
     const unitLabels = { d: 'jour(s)', h: 'heure(s)', m: 'minute(s)' };
-    bot.sendMessage(chatId, `✅ ZIVPN *${pending.user}* ${pending.sign === 'a' ? '+' : '-'}${amount} ${unitLabels[pending.unit]} → *${newExpiry}*`, { parse_mode: 'Markdown' });
-  } catch (err) { bot.sendMessage(chatId, `❌ Erreur: ${err.message}`); }
+    autoDeleteSend(bot, chatId, `✅ ZIVPN *${pending.user}* ${pending.sign === 'a' ? '+' : '-'}${amount} ${unitLabels[pending.unit]} → *${newExpiry}*`, { parse_mode: 'Markdown' });
+  } catch (err) { autoDeleteSend(bot, chatId, `❌ Erreur: ${err.message}`); }
 }
 
 async function deleteUser(bot, chatId, msgId, username) {
   try {
+    // Remove password from ZiVPN config
+    const info = JSON.parse(await runCommand(`cat ${USERS_DB}/${username}.json`));
+    await removeFromZivpnConfig(info.password);
     await runCommand(`rm -f ${USERS_DB}/${username}.json`);
     await removeDataLimit(PROTO, username);
     editOrSend(bot, chatId, msgId, `✅ ZIVPN *${username}* supprimé.`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🔙 Retour', callback_data: `menu_${PROTO}` }]] } });
@@ -258,8 +294,9 @@ async function showDetail(bot, chatId, msgId, username) {
     const domain = await getDomain();
     const limit = await getDataLimit(PROTO, username);
     const conn = await getConnLimit(PROTO, username);
+    const createdBy = info.createdBy || 'N/A';
     editOrSend(bot, chatId, msgId,
-      `━━━━━━━━━━━━━━━━━━━━━\n🔍 *ZIVPN: ${username}*\n━━━━━━━━━━━━━━━━━━━━━\n🔑 Pass: \`${info.password}\`\n🌐 Domain: \`${domain}\`\n📅 Expiry: \`${info.expiry}\`\n🔢 Max Conn: ${conn ? conn.maxConn : '♾'}\n📦 Quota: ${limit ? formatBytes(limit.limitBytes) : '♾'}\n━━━━━━━━━━━━━━━━━━━━━`,
+      `━━━━━━━━━━━━━━━━━━━━━\n🔍 *ZIVPN: ${username}*\n━━━━━━━━━━━━━━━━━━━━━\n🔑 Pass: \`${info.password}\`\n🌐 Domain: \`${domain}\`\n📅 Expiry: \`${info.expiry}\`\n🔢 Max Conn: ${conn ? conn.maxConn : '♾'}\n📦 Quota: ${limit ? formatBytes(limit.limitBytes) : '♾'}\n👷 Créé par: ${createdBy}\n━━━━━━━━━━━━━━━━━━━━━`,
       { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🔙 Retour', callback_data: `menu_${PROTO}` }]] } }
     );
   } catch (err) { editOrSend(bot, chatId, msgId, `❌ Erreur: ${err.message}`); }
@@ -277,19 +314,19 @@ async function showTraffic(bot, chatId, msgId, username) {
 
 async function handleQuotaFlow(bot, chatId, text, pending, pendingActions) {
   delete pendingActions[chatId];
-  if (text.trim() === '0') { await removeDataLimit(PROTO, pending.user); bot.sendMessage(chatId, `✅ Quota supprimé pour *${pending.user}*`, { parse_mode: 'Markdown' }); return; }
+  if (text.trim() === '0') { await removeDataLimit(PROTO, pending.user); autoDeleteSend(bot, chatId, `✅ Quota supprimé pour *${pending.user}*`, { parse_mode: 'Markdown' }); return; }
   const bytes = parseLimitToBytes(text.trim());
-  if (!bytes) { bot.sendMessage(chatId, '❌ Format invalide.'); return; }
+  if (!bytes) { autoDeleteSend(bot, chatId, '❌ Format invalide.'); return; }
   await setDataLimit(PROTO, pending.user, bytes);
-  bot.sendMessage(chatId, `✅ Quota *${pending.user}*: ${formatBytes(bytes)}`, { parse_mode: 'Markdown' });
+  autoDeleteSend(bot, chatId, `✅ Quota *${pending.user}*: ${formatBytes(bytes)}`, { parse_mode: 'Markdown' });
 }
 
 async function handleConnLimitFlow(bot, chatId, text, pending, pendingActions) {
   delete pendingActions[chatId];
   const max = parseInt(text);
-  if (isNaN(max) || max < 0) { bot.sendMessage(chatId, '❌ Invalide.'); return; }
+  if (isNaN(max) || max < 0) { autoDeleteSend(bot, chatId, '❌ Invalide.'); return; }
   await setConnLimit(PROTO, pending.user, max);
-  bot.sendMessage(chatId, `✅ Limite connexions *${pending.user}*: ${max || '♾'}`, { parse_mode: 'Markdown' });
+  autoDeleteSend(bot, chatId, `✅ Limite connexions *${pending.user}*: ${max || '♾'}`, { parse_mode: 'Markdown' });
 }
 
 module.exports = { showMenu, handleCallback };

@@ -2,7 +2,7 @@ const { runCommand, getDomain } = require('../utils/exec');
 const { generateUUID, getExpiryDate, adjustExpiry } = require('../utils/helpers');
 const { paginatedKeyboard, getPageFromCallback } = require('../utils/pagination');
 const { getXrayTraffic, formatBytes, parseLimitToBytes, setDataLimit, getDataLimit, removeDataLimit, setConnLimit, getConnLimit } = require('../utils/traffic');
-
+const { autoDeleteSend } = require('../utils/autodelete');
 const USERS_DB = '/etc/xray/users-vmess';
 const PROTO = 'vmess';
 const INBOUND_INDEX = 1;
@@ -47,7 +47,7 @@ async function handleCallback(bot, chatId, data, query, pendingActions) {
   switch (data) {
     case `${P}_create`:
       editOrSend(bot, chatId, msgId, '📝 Nom d\'utilisateur VMESS:');
-      pendingActions[chatId] = { action: `${P}_create`, step: 'username', handler: handleCreateFlow };
+      pendingActions[chatId] = { action: `${P}_create`, step: 'username', handler: handleCreateFlow, fromId: query.from.id, fromName: query.from.first_name || query.from.username || String(query.from.id) };
       break;
     case `${P}_modify`: await showPaginatedList(bot, chatId, msgId, `${P}_mod_`, `${P}_pgm_`, 0); break;
     case `${P}_delete`: await showPaginatedList(bot, chatId, msgId, `${P}_del_`, `${P}_pgl_`, 0); break;
