@@ -127,6 +127,10 @@ bot.on('callback_query', async (query) => {
     if (data === 'menu_netguard') return netguardHandler.showMenu(bot, chatId);
     if (data === 'menu_zivpn') return zivpnHandler.showMenu(bot, chatId);
     if (data === 'menu_udp') return udpHandler.showMenu(bot, chatId);
+    if (data === 'menu_admin') return adminHandler.showMenu(bot, chatId, query.from.id);
+
+    // Admin sub-actions
+    if (data.startsWith('admin_')) return adminHandler.handleCallback(bot, chatId, data, query, pendingActions);
 
     // VLESS sub-actions
     if (data.startsWith('vless_')) return vlessHandler.handleCallback(bot, chatId, data, query);
