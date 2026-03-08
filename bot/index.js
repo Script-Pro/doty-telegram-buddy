@@ -1,6 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
 const config = require('./config');
-const { isAdmin } = require('./utils/helpers');
 
 // Import handlers
 const vlessHandler = require('./handlers/vless');
@@ -18,15 +17,17 @@ const backupHandler = require('./handlers/backup');
 const zivpnHandler = require('./handlers/zivpn');
 const udpHandler = require('./handlers/udp');
 const netguardHandler = require('./handlers/netguard');
+const adminHandler = require('./handlers/admin');
+const { isAdminUser } = adminHandler;
 
 // Create bot
 const bot = new TelegramBot(config.BOT_TOKEN, { polling: true });
 
 console.log('🐱 DOTYCAT TUNNEL Bot started!');
 
-// Auth middleware
+// Auth middleware - uses multi-admin system
 function authMiddleware(msg) {
-  if (!isAdmin(msg.from.id)) {
+  if (!isAdminUser(msg.from.id)) {
     bot.sendMessage(msg.chat.id, '⛔ Accès refusé. Vous n\'êtes pas autorisé.');
     return false;
   }
@@ -73,6 +74,7 @@ bot.onText(/\/start/, (msg) => {
           { text: '🔄 UPDATE', callback_data: 'update_script' },
         ],
         [
+          { text: '👥 ADMINS', callback_data: 'menu_admin' },
           { text: '📑 SERVER INFO', callback_data: 'server_info' },
         ],
       ],
@@ -101,7 +103,7 @@ bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const data = query.data;
 
-  if (!isAdmin(query.from.id)) {
+  if (!isAdminUser(query.from.id)) {
     bot.answerCallbackQuery(query.id, { text: '⛔ Accès refusé.' });
     return;
   }
@@ -125,6 +127,10 @@ bot.on('callback_query', async (query) => {
     if (data === 'menu_netguard') return netguardHandler.showMenu(bot, chatId);
     if (data === 'menu_zivpn') return zivpnHandler.showMenu(bot, chatId);
     if (data === 'menu_udp') return udpHandler.showMenu(bot, chatId);
+    if (data === 'menu_admin') return adminHandler.showMenu(bot, chatId, query.from.id);
+
+    // Admin sub-actions
+    if (data.startsWith('admin_')) return adminHandler.handleCallback(bot, chatId, data, query, pendingActions);
 
     // VLESS sub-actions
     if (data.startsWith('vless_')) return vlessHandler.handleCallback(bot, chatId, data, query);
@@ -209,7 +215,7 @@ const pendingActions = {};
 
 bot.on('message', (msg) => {
   if (msg.text && msg.text.startsWith('/')) return; // Skip commands
-  if (!isAdmin(msg.from.id)) return;
+  if (!isAdminUser(msg.from.id)) return;
 
   const chatId = msg.chat.id;
   const pending = pendingActions[chatId];
