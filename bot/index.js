@@ -30,7 +30,7 @@ const monitorHandler = require('./handlers/monitor');
 const auditHandler = require('./handlers/audit');
 const helpHandler = require('./handlers/help');
 const { initTrafficMonitor } = require('./utils/trafficMonitor');
-
+const { getConfig: getAutoDeleteConfig, saveConfig: saveAutoDeleteConfig } = require('./utils/autodelete');
 const { isAdminUser } = adminHandler;
 
 // Create bot
@@ -130,6 +130,7 @@ function getMainMenuKeyboard() {
       ],
       [
         { text: '📖 AIDE', callback_data: 'menu_help' },
+        { text: '🗑 AUTO-DELETE', callback_data: 'menu_autodel' },
       ],
     ],
   };
@@ -293,13 +294,68 @@ bot.on('callback_query', async (query) => {
       }
     }
 
-    // Back to main menu — edit message instead of new
+    // Back to main menu
     if (data === 'back_main') {
       editOrSend(bot, chatId, msgId, getMainMenuText(), {
         parse_mode: 'Markdown',
         reply_markup: getMainMenuKeyboard(),
       });
     }
+
+    // Auto-delete config menu
+    if (data === 'menu_autodel') {
+      const cfg = getAutoDeleteConfig();
+      const unitLabel = cfg.unit === 'm' ? 'minute(s)' : 'seconde(s)';
+      editOrSend(bot, chatId, msgId, `━━━━━━━━━━━━━━━━━━━━━\n🗑 *AUTO-DELETE MESSAGES*\n━━━━━━━━━━━━━━━━━━━━━\nStatut: ${cfg.enabled ? '✅ Activé' : '❌ Désactivé'}\nDélai: ${cfg.delay} ${unitLabel}\n━━━━━━━━━━━━━━━━━━━━━`, {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: [
+          [{ text: cfg.enabled ? '❌ Désactiver' : '✅ Activer', callback_data: 'autodel_toggle' }],
+          [{ text: '⏱ Changer délai', callback_data: 'autodel_delay' }],
+          [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }],
+        ] }
+      });
+    }
+
+    if (data === 'autodel_toggle') {
+      const cfg = getAutoDeleteConfig();
+      cfg.enabled = !cfg.enabled;
+      saveAutoDeleteConfig(cfg);
+      editOrSend(bot, chatId, msgId, `✅ Auto-delete ${cfg.enabled ? 'activé' : 'désactivé'}.`, {
+        reply_markup: { inline_keyboard: [[{ text: '🔙 Retour', callback_data: 'menu_autodel' }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] }
+      });
+    }
+
+    if (data === 'autodel_delay') {
+      editOrSend(bot, chatId, msgId, '⏱ Unité:', {
+        reply_markup: { inline_keyboard: [
+          [{ text: '⏱ Secondes (s)', callback_data: 'autodel_unit_s' }],
+          [{ text: '🕐 Minutes (m)', callback_data: 'autodel_unit_m' }],
+          [{ text: '🔙 Retour', callback_data: 'menu_autodel' }],
+        ] }
+      });
+    }
+
+    if (data === 'autodel_unit_s' || data === 'autodel_unit_m') {
+      const unit = data === 'autodel_unit_s' ? 's' : 'm';
+      const label = unit === 's' ? 'secondes' : 'minutes';
+      editOrSend(bot, chatId, msgId, `🔢 Nombre de ${label}:`);
+      pendingActions[chatId] = {
+        action: 'autodel_set_delay',
+        handler: (bot, cid, text, pending, pa) => {
+          delete pa[cid];
+          const val = parseInt(text);
+          if (isNaN(val) || val < 5) return bot.sendMessage(cid, '❌ Minimum 5.');
+          const cfg = getAutoDeleteConfig();
+          cfg.delay = val;
+          cfg.unit = unit;
+          saveAutoDeleteConfig(cfg);
+          bot.sendMessage(cid, `✅ Délai auto-delete: ${val} ${label}`, {
+            reply_markup: { inline_keyboard: [[{ text: '🔙 Retour', callback_data: 'menu_autodel' }]] }
+          });
+        },
+      };
+    }
+
   } catch (err) {
     bot.sendMessage(chatId, `❌ Erreur: ${err.message}`);
   }
