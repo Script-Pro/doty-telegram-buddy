@@ -1,6 +1,5 @@
 const TelegramBot = require('node-telegram-bot-api');
 const config = require('./config');
-const { isAdmin } = require('./utils/helpers');
 
 // Import handlers
 const vlessHandler = require('./handlers/vless');
@@ -18,15 +17,17 @@ const backupHandler = require('./handlers/backup');
 const zivpnHandler = require('./handlers/zivpn');
 const udpHandler = require('./handlers/udp');
 const netguardHandler = require('./handlers/netguard');
+const adminHandler = require('./handlers/admin');
+const { isAdminUser } = adminHandler;
 
 // Create bot
 const bot = new TelegramBot(config.BOT_TOKEN, { polling: true });
 
 console.log('🐱 DOTYCAT TUNNEL Bot started!');
 
-// Auth middleware
+// Auth middleware - uses multi-admin system
 function authMiddleware(msg) {
-  if (!isAdmin(msg.from.id)) {
+  if (!isAdminUser(msg.from.id)) {
     bot.sendMessage(msg.chat.id, '⛔ Accès refusé. Vous n\'êtes pas autorisé.');
     return false;
   }
