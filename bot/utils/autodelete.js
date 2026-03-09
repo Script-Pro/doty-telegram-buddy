@@ -28,12 +28,12 @@ function getDelayMs() {
 }
 
 /**
- * Send a message that auto-deletes after configured delay
- * Also deletes the user's message if userMsgId is provided
+ * Send a message that auto-deletes after configured delay.
+ * Also deletes the user's message (userMsgId) if provided.
  */
 function autoDeleteSend(bot, chatId, text, opts = {}, userMsgId = null) {
   const delayMs = getDelayMs();
-  // Delete user message too
+  // Delete user's message too
   if (userMsgId && delayMs > 0) {
     setTimeout(() => {
       bot.deleteMessage(chatId, userMsgId).catch(() => {});

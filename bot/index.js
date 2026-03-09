@@ -1,7 +1,6 @@
 const TelegramBot = require('node-telegram-bot-api');
 const config = require('./config');
 
-// Import handlers
 const vlessHandler = require('./handlers/vless');
 const vmessHandler = require('./handlers/vmess');
 const trojanHandler = require('./handlers/trojan');
@@ -30,140 +29,75 @@ const monitorHandler = require('./handlers/monitor');
 const auditHandler = require('./handlers/audit');
 const helpHandler = require('./handlers/help');
 const { initTrafficMonitor } = require('./utils/trafficMonitor');
-const { getConfig: getAutoDeleteConfig, saveConfig: saveAutoDeleteConfig } = require('./utils/autodelete');
+const { getConfig: getAutoDeleteConfig, saveConfig: saveAutoDeleteConfig, scheduleDelete } = require('./utils/autodelete');
 const { isAdminUser } = adminHandler;
 
-// Create bot
 const bot = new TelegramBot(config.BOT_TOKEN, { polling: true });
-
 console.log('🐱 DOTYCAT TUNNEL Bot started!');
 
-// Initialize auto-start modules
 autoexpireHandler.init(bot);
 monitorHandler.init(bot);
 initTrafficMonitor(bot);
 
-// Auth middleware
 function authMiddleware(msg) {
   if (!isAdminUser(msg.from.id)) {
-    bot.sendMessage(msg.chat.id, '⛔ Accès refusé. Vous n\'êtes pas autorisé.');
+    bot.sendMessage(msg.chat.id, '⛔ Accès refusé.');
     return false;
   }
   return true;
 }
 
-// Helper: edit message or send new
 function editOrSend(bot, chatId, msgId, text, opts = {}) {
-  if (msgId) {
-    return bot.editMessageText(text, { chat_id: chatId, message_id: msgId, ...opts }).catch(() => bot.sendMessage(chatId, text, opts));
-  }
+  if (msgId) return bot.editMessageText(text, { chat_id: chatId, message_id: msgId, ...opts }).catch(() => bot.sendMessage(chatId, text, opts));
   return bot.sendMessage(chatId, text, opts);
 }
 
 function getMainMenuText() {
-  return `━━━━━━━━━━━━━━━━━━━━━
-🐱 *DOTYCAT TUNNEL BOT* 🐱
-━━━━━━━━━━━━━━━━━━━━━
-Bienvenue dans le panneau de gestion.
-Sélectionnez une option ci-dessous:
-━━━━━━━━━━━━━━━━━━━━━`;
+  return `━━━━━━━━━━━━━━━━━━━━━\n🐱 *DOTYCAT TUNNEL BOT* 🐱\n━━━━━━━━━━━━━━━━━━━━━\nBienvenue dans le panneau de gestion.\nSélectionnez une option ci-dessous:\n━━━━━━━━━━━━━━━━━━━━━`;
 }
 
 function getMainMenuKeyboard() {
   return {
     inline_keyboard: [
-      [
-        { text: '🔰 VLESS', callback_data: 'menu_vless' },
-        { text: '🔰 VMESS', callback_data: 'menu_vmess' },
-      ],
-      [
-        { text: '🔰 TROJAN', callback_data: 'menu_trojan' },
-        { text: '🔰 SOCKS', callback_data: 'menu_socks' },
-      ],
-      [
-        { text: '🔑 SSH', callback_data: 'menu_ssh' },
-        { text: '🌐 OPENVPN', callback_data: 'menu_openvpn' },
-      ],
-      [
-        { text: '🌍 DOMAIN', callback_data: 'menu_domain' },
-        { text: '📡 DNS/SLDNS', callback_data: 'menu_dns' },
-      ],
-      [
-        { text: '🔧 PORTS', callback_data: 'menu_port' },
-        { text: '📊 STATUS', callback_data: 'menu_status' },
-      ],
-      [
-        { text: '📋 LOGS', callback_data: 'menu_log' },
-        { text: '💾 BACKUP', callback_data: 'menu_backup' },
-      ],
-      [
-        { text: '🛡️ NETGUARD', callback_data: 'menu_netguard' },
-        { text: '📱 ZIVPN', callback_data: 'menu_zivpn' },
-      ],
-      [
-        { text: '🔌 UDP CUSTOM', callback_data: 'menu_udp' },
-        { text: '🔄 UPDATE', callback_data: 'update_script' },
-      ],
-      [
-        { text: '📊 STATS', callback_data: 'menu_stats' },
-        { text: '⏰ AUTO-EXPIRE', callback_data: 'menu_autoexpire' },
-      ],
-      [
-        { text: '📢 BROADCAST', callback_data: 'menu_broadcast' },
-        { text: '🧪 SPEEDTEST', callback_data: 'menu_speedtest' },
-      ],
-      [
-        { text: '🔐 FIREWALL', callback_data: 'menu_firewall' },
-        { text: '📦 MULTI-SERVER', callback_data: 'menu_multiserver' },
-      ],
-      [
-        { text: '🕐 TRIAL', callback_data: 'menu_trial' },
-        { text: '📱 QR CODE', callback_data: 'menu_qrcode' },
-      ],
-      [
-        { text: '🛡️ MONITOR', callback_data: 'menu_monitor' },
-        { text: '📋 AUDIT', callback_data: 'menu_audit' },
-      ],
-      [
-        { text: '👥 ADMINS', callback_data: 'menu_admin' },
-        { text: '📑 SERVER INFO', callback_data: 'server_info' },
-      ],
-      [
-        { text: '📖 AIDE', callback_data: 'menu_help' },
-        { text: '🗑 AUTO-DELETE', callback_data: 'menu_autodel' },
-      ],
+      [{ text: '🔰 VLESS', callback_data: 'menu_vless' }, { text: '🔰 VMESS', callback_data: 'menu_vmess' }],
+      [{ text: '🔰 TROJAN', callback_data: 'menu_trojan' }, { text: '🔰 SOCKS', callback_data: 'menu_socks' }],
+      [{ text: '🔑 SSH', callback_data: 'menu_ssh' }, { text: '🌐 OPENVPN', callback_data: 'menu_openvpn' }],
+      [{ text: '🌍 DOMAIN', callback_data: 'menu_domain' }, { text: '📡 DNS/SLDNS', callback_data: 'menu_dns' }],
+      [{ text: '🔧 PORTS', callback_data: 'menu_port' }, { text: '📊 STATUS', callback_data: 'menu_status' }],
+      [{ text: '📋 LOGS', callback_data: 'menu_log' }, { text: '💾 BACKUP', callback_data: 'menu_backup' }],
+      [{ text: '🛡️ NETGUARD', callback_data: 'menu_netguard' }, { text: '📱 ZIVPN', callback_data: 'menu_zivpn' }],
+      [{ text: '🔌 UDP CUSTOM', callback_data: 'menu_udp' }, { text: '🔄 UPDATE', callback_data: 'update_script' }],
+      [{ text: '📊 STATS', callback_data: 'menu_stats' }, { text: '⏰ AUTO-EXPIRE', callback_data: 'menu_autoexpire' }],
+      [{ text: '📢 BROADCAST', callback_data: 'menu_broadcast' }, { text: '🧪 SPEEDTEST', callback_data: 'menu_speedtest' }],
+      [{ text: '🔐 FIREWALL', callback_data: 'menu_firewall' }, { text: '📦 MULTI-SERVER', callback_data: 'menu_multiserver' }],
+      [{ text: '🕐 TRIAL', callback_data: 'menu_trial' }, { text: '📱 QR CODE', callback_data: 'menu_qrcode' }],
+      [{ text: '🛡️ MONITOR', callback_data: 'menu_monitor' }, { text: '📋 AUDIT', callback_data: 'menu_audit' }],
+      [{ text: '👥 ADMINS', callback_data: 'menu_admin' }, { text: '📑 SERVER INFO', callback_data: 'server_info' }],
+      [{ text: '📖 AIDE', callback_data: 'menu_help' }, { text: '🗑 AUTO-DELETE', callback_data: 'menu_autodel' }],
     ],
   };
 }
 
-// /start command
 bot.onText(/\/start/, (msg) => {
   if (!authMiddleware(msg)) return;
-  bot.sendMessage(msg.chat.id, getMainMenuText(), {
-    parse_mode: 'Markdown',
-    reply_markup: getMainMenuKeyboard(),
-  });
+  scheduleDelete(bot, msg.chat.id, msg.message_id);
+  bot.sendMessage(msg.chat.id, getMainMenuText(), { parse_mode: 'Markdown', reply_markup: getMainMenuKeyboard() });
 });
 
-// /menu command (alias for /start)
 bot.onText(/\/menu/, (msg) => {
   if (!authMiddleware(msg)) return;
-  bot.sendMessage(msg.chat.id, getMainMenuText(), {
-    parse_mode: 'Markdown',
-    reply_markup: getMainMenuKeyboard(),
-  });
+  scheduleDelete(bot, msg.chat.id, msg.message_id);
+  bot.sendMessage(msg.chat.id, getMainMenuText(), { parse_mode: 'Markdown', reply_markup: getMainMenuKeyboard() });
 });
 
-// /help command
 bot.onText(/\/help/, (msg) => {
   if (!authMiddleware(msg)) return;
+  scheduleDelete(bot, msg.chat.id, msg.message_id);
   helpHandler.showHelp(bot, msg.chat.id);
 });
 
-// Handle text messages for interactive flows
 const pendingActions = {};
 
-// Handle callback queries (button presses)
 bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const msgId = query.message.message_id;
@@ -173,14 +107,10 @@ bot.on('callback_query', async (query) => {
     bot.answerCallbackQuery(query.id, { text: '⛔ Accès refusé.' });
     return;
   }
-
   bot.answerCallbackQuery(query.id);
-
-  // Ignore noop
   if (data === 'noop') return;
 
   try {
-    // Main menus — use editMessageText to update instead of new message
     const menus = {
       menu_vless: () => vlessHandler.showMenu(bot, chatId, msgId),
       menu_vmess: () => vmessHandler.showMenu(bot, chatId, msgId),
@@ -213,12 +143,8 @@ bot.on('callback_query', async (query) => {
 
     if (menus[data]) return menus[data]();
 
-    // Help pages
-    if (data.startsWith('help_page_')) {
-      return helpHandler.handleCallback(bot, chatId, data, query);
-    }
+    if (data.startsWith('help_page_')) return helpHandler.handleCallback(bot, chatId, data, query);
 
-    // Sub-action routing by prefix
     const prefixHandlers = [
       ['admin_', adminHandler],
       ['vless_', vlessHandler],
@@ -246,67 +172,68 @@ bot.on('callback_query', async (query) => {
       ['qr_', qrcodeHandler],
       ['mon_', monitorHandler],
       ['audit_', auditHandler],
+      ['quota_', { handleCallback: async (bot, chatId, data, query, pa) => {
+        // Handle quota extension from traffic monitor alerts
+        const parts = data.replace('quota_', '').split('_');
+        if (parts[0] === 'ext') {
+          const proto = parts[1]; const user = parts.slice(2).join('_');
+          editOrSend(bot, chatId, msgId, `📦 Nouveau quota pour *${user}* (ex: 5GB):`, { parse_mode: 'Markdown' });
+          pendingActions[chatId] = { action: 'quota_extend', protocol: proto, user, handler: async (bot, cid, text, pending, pa, userMsgId) => {
+            delete pa[cid];
+            const { parseLimitToBytes, setDataLimit, formatBytes } = require('./utils/traffic');
+            const bytes = parseLimitToBytes(text.trim());
+            if (!bytes) return bot.sendMessage(cid, '❌ Format invalide.', { reply_markup: { inline_keyboard: [[{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } });
+            await setDataLimit(pending.protocol, pending.user, bytes);
+            // Unsuspend: re-add to config
+            const { runCommand } = require('./utils/exec');
+            try {
+              const limitFile = `/etc/xray/limits/${pending.protocol}_${pending.user}.json`;
+              const ld = JSON.parse(await runCommand(`cat ${limitFile}`));
+              ld.suspended = false; ld.limitBytes = bytes;
+              await runCommand(`echo '${JSON.stringify(ld)}' > ${limitFile}`);
+            } catch {}
+            bot.sendMessage(cid, `✅ Quota prolongé: *${pending.user}* = ${formatBytes(bytes)}`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } });
+          }};
+        } else if (parts[0] === 'del') {
+          const proto = parts[1]; const user = parts.slice(2).join('_');
+          editOrSend(bot, chatId, msgId, `✅ Compte *${user}* marqué pour suppression. Utilisez le menu ${proto.toUpperCase()} pour supprimer.`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } });
+        }
+      }}],
     ];
 
     for (const [prefix, handler] of prefixHandlers) {
-      if (data.startsWith(prefix)) {
-        return handler.handleCallback(bot, chatId, data, query, pendingActions);
-      }
+      if (data.startsWith(prefix)) return handler.handleCallback(bot, chatId, data, query, pendingActions);
     }
 
-    // Server info
     if (data === 'server_info') {
       const { runCommand, getServerIP, getDomain } = require('./utils/exec');
-      const ip = await getServerIP();
-      const domain = await getDomain();
+      const ip = await getServerIP(); const domain = await getDomain();
       let uptime = 'N/A', os = 'N/A', ram = 'N/A', cpu = 'N/A';
       try { uptime = await runCommand('uptime -p'); } catch {}
       try { os = await runCommand('cat /etc/os-release | grep PRETTY_NAME | cut -d= -f2 | tr -d \'"\''); } catch {}
       try { ram = await runCommand('free -m | awk \'NR==2{printf "%sMB / %sMB (%.1f%%)", $3, $2, $3*100/$2}\''); } catch {}
       try { cpu = await runCommand('nproc'); } catch {}
-
-      editOrSend(bot, chatId, msgId,
-        `━━━━━━━━━━━━━━━━━━━━━
-📑 *SERVER INFO*
-━━━━━━━━━━━━━━━━━━━━━
-🌐 IP: \`${ip}\`
-🔗 Domain: \`${domain}\`
-💻 OS: ${os}
-⏱ Uptime: ${uptime}
-🧠 RAM: ${ram}
-⚙️ CPU: ${cpu} cores
-━━━━━━━━━━━━━━━━━━━━━`,
-        { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } }
-      );
+      editOrSend(bot, chatId, msgId, `━━━━━━━━━━━━━━━━━━━━━\n📑 *SERVER INFO*\n━━━━━━━━━━━━━━━━━━━━━\n🌐 IP: \`${ip}\`\n🔗 Domain: \`${domain}\`\n💻 OS: ${os}\n⏱ Uptime: ${uptime}\n🧠 RAM: ${ram}\n⚙️ CPU: ${cpu} cores\n━━━━━━━━━━━━━━━━━━━━━`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } });
     }
 
-    // Update script
     if (data === 'update_script') {
       const { runCommand } = require('./utils/exec');
-      editOrSend(bot, chatId, msgId, '🔄 Mise à jour du script en cours...');
+      editOrSend(bot, chatId, msgId, '🔄 Mise à jour...');
       try {
         await runCommand('wget -O /root/doty.sh https://raw.githubusercontent.com/dotywrt/doty/main/doty.sh && chmod +x /root/doty.sh');
-        bot.sendMessage(chatId, '✅ Script mis à jour avec succès!', {
-          reply_markup: { inline_keyboard: [[{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] }
-        });
-      } catch (err) {
-        bot.sendMessage(chatId, `❌ Erreur: ${err.message}`);
-      }
+        bot.sendMessage(chatId, '✅ Script mis à jour!', { reply_markup: { inline_keyboard: [[{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } });
+      } catch (err) { bot.sendMessage(chatId, `❌ Erreur: ${err.message}`); }
     }
 
-    // Back to main menu
     if (data === 'back_main') {
-      editOrSend(bot, chatId, msgId, getMainMenuText(), {
-        parse_mode: 'Markdown',
-        reply_markup: getMainMenuKeyboard(),
-      });
+      editOrSend(bot, chatId, msgId, getMainMenuText(), { parse_mode: 'Markdown', reply_markup: getMainMenuKeyboard() });
     }
 
-    // Auto-delete config menu
+    // Auto-delete config
     if (data === 'menu_autodel') {
       const cfg = getAutoDeleteConfig();
       const unitLabel = cfg.unit === 'm' ? 'minute(s)' : 'seconde(s)';
-      editOrSend(bot, chatId, msgId, `━━━━━━━━━━━━━━━━━━━━━\n🗑 *AUTO-DELETE MESSAGES*\n━━━━━━━━━━━━━━━━━━━━━\nStatut: ${cfg.enabled ? '✅ Activé' : '❌ Désactivé'}\nDélai: ${cfg.delay} ${unitLabel}\n━━━━━━━━━━━━━━━━━━━━━`, {
+      editOrSend(bot, chatId, msgId, `━━━━━━━━━━━━━━━━━━━━━\n🗑 *AUTO-DELETE MESSAGES*\n━━━━━━━━━━━━━━━━━━━━━\nStatut: ${cfg.enabled ? '✅ Activé' : '❌ Désactivé'}\nDélai: ${cfg.delay} ${unitLabel}\n\n_Supprime les messages du bot ET de l'utilisateur_\n━━━━━━━━━━━━━━━━━━━━━`, {
         parse_mode: 'Markdown',
         reply_markup: { inline_keyboard: [
           [{ text: cfg.enabled ? '❌ Désactiver' : '✅ Activer', callback_data: 'autodel_toggle' }],
@@ -315,26 +242,17 @@ bot.on('callback_query', async (query) => {
         ] }
       });
     }
-
     if (data === 'autodel_toggle') {
-      const cfg = getAutoDeleteConfig();
-      cfg.enabled = !cfg.enabled;
-      saveAutoDeleteConfig(cfg);
+      const cfg = getAutoDeleteConfig(); cfg.enabled = !cfg.enabled; saveAutoDeleteConfig(cfg);
       editOrSend(bot, chatId, msgId, `✅ Auto-delete ${cfg.enabled ? 'activé' : 'désactivé'}.`, {
         reply_markup: { inline_keyboard: [[{ text: '🔙 Retour', callback_data: 'menu_autodel' }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] }
       });
     }
-
     if (data === 'autodel_delay') {
       editOrSend(bot, chatId, msgId, '⏱ Unité:', {
-        reply_markup: { inline_keyboard: [
-          [{ text: '⏱ Secondes (s)', callback_data: 'autodel_unit_s' }],
-          [{ text: '🕐 Minutes (m)', callback_data: 'autodel_unit_m' }],
-          [{ text: '🔙 Retour', callback_data: 'menu_autodel' }],
-        ] }
+        reply_markup: { inline_keyboard: [[{ text: '⏱ Secondes (s)', callback_data: 'autodel_unit_s' }], [{ text: '🕐 Minutes (m)', callback_data: 'autodel_unit_m' }], [{ text: '🔙 Retour', callback_data: 'menu_autodel' }]] }
       });
     }
-
     if (data === 'autodel_unit_s' || data === 'autodel_unit_m') {
       const unit = data === 'autodel_unit_s' ? 's' : 'm';
       const label = unit === 's' ? 'secondes' : 'minutes';
@@ -344,23 +262,16 @@ bot.on('callback_query', async (query) => {
         handler: (bot, cid, text, pending, pa) => {
           delete pa[cid];
           const val = parseInt(text);
-          if (isNaN(val) || val < 5) return bot.sendMessage(cid, '❌ Minimum 5.');
-          const cfg = getAutoDeleteConfig();
-          cfg.delay = val;
-          cfg.unit = unit;
-          saveAutoDeleteConfig(cfg);
-          bot.sendMessage(cid, `✅ Délai auto-delete: ${val} ${label}`, {
-            reply_markup: { inline_keyboard: [[{ text: '🔙 Retour', callback_data: 'menu_autodel' }]] }
-          });
+          if (isNaN(val) || val < 5) return bot.sendMessage(cid, '❌ Minimum 5.', { reply_markup: { inline_keyboard: [[{ text: '🔄 Réessayer', callback_data: 'autodel_delay' }, { text: '❌ Annuler', callback_data: 'menu_autodel' }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } });
+          const cfg = getAutoDeleteConfig(); cfg.delay = val; cfg.unit = unit; saveAutoDeleteConfig(cfg);
+          bot.sendMessage(cid, `✅ Délai: ${val} ${label}`, { reply_markup: { inline_keyboard: [[{ text: '🔙 Retour', callback_data: 'menu_autodel' }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } });
         },
       };
     }
-
-  } catch (err) {
-    bot.sendMessage(chatId, `❌ Erreur: ${err.message}`);
-  }
+  } catch (err) { bot.sendMessage(chatId, `❌ Erreur: ${err.message}`); }
 });
 
+// Handle text messages - pass userMsgId for auto-delete
 bot.on('message', (msg) => {
   if (msg.text && msg.text.startsWith('/')) return;
   if (!isAdminUser(msg.from.id)) return;
@@ -369,18 +280,14 @@ bot.on('message', (msg) => {
   const pending = pendingActions[chatId];
 
   if (pending) {
-    pending.handler(bot, chatId, msg.text, pending, pendingActions);
+    // Schedule delete of user's message
+    scheduleDelete(bot, chatId, msg.message_id);
+    // Pass userMsgId as 6th argument to handler
+    pending.handler(bot, chatId, msg.text, pending, pendingActions, msg.message_id);
   }
 });
 
-// Export pendingActions for handlers
 module.exports = { bot, pendingActions };
 
-// Error handling
-bot.on('polling_error', (error) => {
-  console.error('Polling error:', error.message);
-});
-
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception:', err);
-});
+bot.on('polling_error', (error) => { console.error('Polling error:', error.message); });
+process.on('uncaughtException', (err) => { console.error('Uncaught exception:', err); });

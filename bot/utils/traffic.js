@@ -5,47 +5,26 @@ const path = require('path');
 const TRAFFIC_DIR = '/etc/xray/traffic';
 const LIMITS_DIR = '/etc/xray/limits';
 
-/**
- * Ensure traffic/limits directories exist
- */
-async function ensureDirs() {
-  try {
-    await runCommand(`mkdir -p ${TRAFFIC_DIR} ${LIMITS_DIR}`);
-  } catch {}
-}
+async function ensureDirs() { try { await runCommand(`mkdir -p ${TRAFFIC_DIR} ${LIMITS_DIR}`); } catch {} }
 
-/**
- * Get Xray traffic stats for a user (email)
- * Returns { uplink, downlink, total } in bytes
- */
 async function getXrayTraffic(email) {
   try {
-    const up = await runCommand(`xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>${email}>>>traffic>>>uplink" 2>/dev/null | grep value | awk '{print $2}'`).catch(() => '0');
-    const down = await runCommand(`xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>${email}>>>traffic>>>downlink" 2>/dev/null | grep value | awk '{print $2}'`).catch(() => '0');
+    const up = await runCommand(`xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>${email}>>>traffic>>>uplink" 2>/dev/null | grep -oP '"value":\\s*"\\K[^"]+' || echo 0`).catch(() => '0');
+    const down = await runCommand(`xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>${email}>>>traffic>>>downlink" 2>/dev/null | grep -oP '"value":\\s*"\\K[^"]+' || echo 0`).catch(() => '0');
     const uplink = parseInt(up) || 0;
     const downlink = parseInt(down) || 0;
     return { uplink, downlink, total: uplink + downlink };
-  } catch {
-    return { uplink: 0, downlink: 0, total: 0 };
-  }
+  } catch { return { uplink: 0, downlink: 0, total: 0 }; }
 }
 
-/**
- * Get SSH traffic for a user via iptables accounting
- */
 async function getSSHTraffic(username) {
   try {
     const result = await runCommand(`iptables -nvx -L OUTPUT 2>/dev/null | grep "owner UID match $(id -u ${username} 2>/dev/null)" | awk '{print $2}'`).catch(() => '0');
     const bytes = parseInt(result) || 0;
     return { uplink: 0, downlink: bytes, total: bytes };
-  } catch {
-    return { uplink: 0, downlink: 0, total: 0 };
-  }
+  } catch { return { uplink: 0, downlink: 0, total: 0 }; }
 }
 
-/**
- * Format bytes to human readable
- */
 function formatBytes(bytes) {
   if (bytes === 0) return '0 B';
   const k = 1024;
@@ -54,9 +33,6 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
-/**
- * Parse data limit string (e.g., "5GB", "500MB") to bytes
- */
 function parseLimitToBytes(limitStr) {
   const match = limitStr.toUpperCase().match(/^(\d+(?:\.\d+)?)\s*(GB|MB|TB|KB)$/);
   if (!match) return null;
@@ -66,9 +42,6 @@ function parseLimitToBytes(limitStr) {
   return Math.floor(value * multipliers[unit]);
 }
 
-/**
- * Set data limit for a user
- */
 async function setDataLimit(protocol, username, limitBytes) {
   await ensureDirs();
   const filePath = `${LIMITS_DIR}/${protocol}_${username}.json`;
@@ -77,30 +50,15 @@ async function setDataLimit(protocol, username, limitBytes) {
   return data;
 }
 
-/**
- * Get data limit for a user
- */
 async function getDataLimit(protocol, username) {
-  try {
-    const data = await runCommand(`cat ${LIMITS_DIR}/${protocol}_${username}.json 2>/dev/null`);
-    return JSON.parse(data);
-  } catch {
-    return null;
-  }
+  try { const data = await runCommand(`cat ${LIMITS_DIR}/${protocol}_${username}.json 2>/dev/null`); return JSON.parse(data); }
+  catch { return null; }
 }
 
-/**
- * Remove data limit for a user
- */
 async function removeDataLimit(protocol, username) {
-  try {
-    await runCommand(`rm -f ${LIMITS_DIR}/${protocol}_${username}.json`);
-  } catch {}
+  try { await runCommand(`rm -f ${LIMITS_DIR}/${protocol}_${username}.json`); } catch {}
 }
 
-/**
- * Set connection limit for a user
- */
 async function setConnLimit(protocol, username, maxConn) {
   await ensureDirs();
   const filePath = `${LIMITS_DIR}/${protocol}_${username}_conn.json`;
@@ -108,40 +66,24 @@ async function setConnLimit(protocol, username, maxConn) {
   await runCommand(`echo '${JSON.stringify(data)}' > ${filePath}`);
 }
 
-/**
- * Get connection limit for a user
- */
 async function getConnLimit(protocol, username) {
-  try {
-    const data = await runCommand(`cat ${LIMITS_DIR}/${protocol}_${username}_conn.json 2>/dev/null`);
-    return JSON.parse(data);
-  } catch {
-    return null;
-  }
+  try { const data = await runCommand(`cat ${LIMITS_DIR}/${protocol}_${username}_conn.json 2>/dev/null`); return JSON.parse(data); }
+  catch { return null; }
 }
 
-/**
- * Count active connections for xray user
- */
 async function countXrayConnections(email) {
   try {
-    const result = await runCommand(`ss -tnp 2>/dev/null | grep xray | grep ESTAB | wc -l`);
+    // Count actual connections via xray api or ss
+    const result = await runCommand(`ss -tnp 2>/dev/null | grep -i xray | grep ESTAB | wc -l`).catch(() => '0');
     return parseInt(result) || 0;
-  } catch {
-    return 0;
-  }
+  } catch { return 0; }
 }
 
-/**
- * Count active SSH connections for a user
- */
 async function countSSHConnections(username) {
   try {
-    const result = await runCommand(`ps aux | grep "sshd: ${username}" | grep -v grep | wc -l`);
+    const result = await runCommand(`ps aux 2>/dev/null | grep "sshd: ${username}" | grep -v grep | wc -l`);
     return parseInt(result) || 0;
-  } catch {
-    return 0;
-  }
+  } catch { return 0; }
 }
 
 module.exports = {
