@@ -153,7 +153,12 @@ async function handleCallback(bot, chatId, data, query, pendingActions) {
               }
               // Remove from udp/zivpn config
               if (p.proto === 'udp' && info.password) {
-                await runCommand(`jq '.auth.config -= ["${info.password}"]' /etc/udp/config.json > /tmp/udp_tmp.json && mv /tmp/udp_tmp.json /etc/udp/config.json 2>/dev/null || true`);
+                try {
+                  const fs = require('fs');
+                  const udpConfig = JSON.parse(fs.readFileSync('/etc/UDPCustom/config.json', 'utf8'));
+                  udpConfig.auth.config = udpConfig.auth.config.filter(pw => pw !== info.password);
+                  fs.writeFileSync('/etc/UDPCustom/config.json', JSON.stringify(udpConfig, null, 2), 'utf8');
+                } catch {}
               }
               if (p.proto === 'zivpn' && info.password) {
                 await runCommand(`jq '.auth.config -= ["${info.password}"]' /etc/zivpn/config.json > /tmp/ziv_tmp.json && mv /tmp/ziv_tmp.json /etc/zivpn/config.json 2>/dev/null || true`);
