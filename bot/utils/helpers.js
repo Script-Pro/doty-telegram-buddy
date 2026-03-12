@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const config = require('../config');
+const { runCommand } = require('./exec');
 
 function isAdmin(userId) {
   return userId === config.ADMIN_ID;
@@ -30,16 +31,8 @@ function getExpiryDate(days) {
   return formatDate(d);
 }
 
-/**
- * Calculate new expiry from current expiry + offset
- * @param {string} currentExpiry - Current expiry date string (DD-MM-YYYY or DD-MM-YYYY HH:MM)
- * @param {number} amount - Amount to add (negative to subtract)
- * @param {string} unit - 'days', 'hours', or 'minutes'
- * @returns {string} New expiry datetime
- */
 function adjustExpiry(currentExpiry, amount, unit) {
   let d;
-  // Parse DD-MM-YYYY or DD-MM-YYYY HH:MM
   const parts = currentExpiry.split(' ');
   const dateParts = parts[0].split('-');
   if (dateParts.length === 3) {
@@ -55,7 +48,6 @@ function adjustExpiry(currentExpiry, amount, unit) {
     d = new Date();
   }
   
-  // If date is in the past, start from now
   if (d < new Date() && amount > 0) {
     d = new Date();
   }
@@ -87,4 +79,24 @@ function escapeMarkdown(text) {
   return text.replace(/[_*[\]()~`>#+=|{}.!-]/g, '\\$&');
 }
 
-module.exports = { isAdmin, generateUUID, formatDate, formatDateTime, getExpiryDate, adjustExpiry, readJSON, writeJSON, escapeMarkdown };
+/**
+ * Find a free port starting from defaultPort
+ * Checks ss -tuln to avoid conflicts
+ */
+async function getFreePort(defaultPort) {
+  let port = defaultPort;
+  const maxAttempts = 100;
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const result = await runCommand(`ss -tuln | grep ":${port} " 2>/dev/null`);
+      if (!result || result.trim() === '') return port;
+      port++;
+    } catch {
+      // grep returns error code 1 when no match = port is free
+      return port;
+    }
+  }
+  return port;
+}
+
+module.exports = { isAdmin, generateUUID, formatDate, formatDateTime, getExpiryDate, adjustExpiry, readJSON, writeJSON, escapeMarkdown, getFreePort };

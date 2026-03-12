@@ -7,18 +7,17 @@ const LIMITS_DIR = '/etc/xray/limits';
 async function ensureDirs() { try { await runCommand(`mkdir -p ${TRAFFIC_DIR} ${LIMITS_DIR}`); } catch {} }
 
 /**
- * Get xray traffic stats via API (grpc stats service)
+ * Get xray traffic stats via API (grpc stats service) — 3x-ui logic
  */
 async function getXrayTraffic(email) {
   try {
     let uplink = 0, downlink = 0;
 
-    // Try xray API stats query
+    // Method 1: Xray API statsquery (3x-ui approach)
     try {
       const upResult = await runCommand(
         `xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>${email}>>>traffic>>>uplink" 2>/dev/null`
       );
-      // Parse the stat value from JSON response
       const upMatch = upResult.match(/"value"\s*:\s*"?(\d+)"?/);
       if (upMatch) uplink = parseInt(upMatch[1]) || 0;
     } catch {}
@@ -31,7 +30,7 @@ async function getXrayTraffic(email) {
       if (downMatch) downlink = parseInt(downMatch[1]) || 0;
     } catch {}
 
-    // Fallback: check stored traffic file
+    // Method 2: Fallback to stored traffic file
     if (uplink === 0 && downlink === 0) {
       try {
         const stored = JSON.parse(fs.readFileSync(`${TRAFFIC_DIR}/${email}.json`, 'utf8'));
@@ -40,21 +39,53 @@ async function getXrayTraffic(email) {
       } catch {}
     }
 
+    // Store current traffic for persistence
+    if (uplink > 0 || downlink > 0) {
+      try {
+        await ensureDirs();
+        fs.writeFileSync(`${TRAFFIC_DIR}/${email}.json`, JSON.stringify({ uplink, downlink, updatedAt: new Date().toISOString() }), 'utf8');
+      } catch {}
+    }
+
     return { uplink, downlink, total: uplink + downlink };
   } catch { return { uplink: 0, downlink: 0, total: 0 }; }
 }
 
 /**
- * Get SSH traffic via iptables
+ * Get SSH traffic via iptables (TMY-SSH-PRO logic)
  */
 async function getSSHTraffic(username) {
   try {
-    // Try iptables accounting
     const result = await runCommand(
       `iptables -nvx -L OUTPUT 2>/dev/null | grep "owner UID match $(id -u ${username} 2>/dev/null)" | awk '{print $2}'`
     ).catch(() => '0');
     const bytes = parseInt(result) || 0;
     return { uplink: 0, downlink: bytes, total: bytes };
+  } catch { return { uplink: 0, downlink: 0, total: 0 }; }
+}
+
+/**
+ * Get UDP traffic via iptables (udp-custom logic)
+ * Since udp-custom runs as a single process, we track per-user via stored counters
+ */
+async function getUdpTraffic(username) {
+  try {
+    // Try iptables owner match first
+    const result = await runCommand(
+      `iptables -L OUTPUT -v -n -x 2>/dev/null | grep "owner UID match $(id -u ${username} 2>/dev/null)" | awk '{print $2}'`
+    ).catch(() => '0');
+    const totalBytes = parseInt(result) || 0;
+    if (totalBytes > 0) {
+      return { uplink: Math.floor(totalBytes / 2), downlink: Math.floor(totalBytes / 2), total: totalBytes };
+    }
+
+    // Fallback: check stored traffic
+    try {
+      const stored = JSON.parse(fs.readFileSync(`${TRAFFIC_DIR}/udp_${username}.json`, 'utf8'));
+      return { uplink: stored.uplink || 0, downlink: stored.downlink || 0, total: (stored.uplink || 0) + (stored.downlink || 0) };
+    } catch {}
+
+    return { uplink: 0, downlink: 0, total: 0 };
   } catch { return { uplink: 0, downlink: 0, total: 0 }; }
 }
 
@@ -109,7 +140,7 @@ async function getConnLimit(protocol, username) {
 }
 
 /**
- * Count SSH connections (inspired by TMY-SSH-PRO: ps aux | grep "sshd: username")
+ * Count SSH connections (TMY-SSH-PRO logic: ps aux | grep "sshd: username")
  */
 async function countSSHConnections(username) {
   try {
@@ -119,21 +150,36 @@ async function countSSHConnections(username) {
 }
 
 /**
- * Count xray connections via access log
+ * Count xray connections via access log + ss
  */
 async function countXrayConnections(email) {
   try {
-    // Count unique source IPs in last 100 access log lines for this user
+    // Method 1: unique source IPs in recent access log
     const result = await runCommand(
-      `grep '${email}' /var/log/xray/access.log 2>/dev/null | tail -100 | awk '{print $3}' | sort -u | wc -l`
+      `grep '${email}' /var/log/xray/access.log 2>/dev/null | tail -100 | awk '{print $3}' | cut -d: -f1 | sort -u | wc -l`
     ).catch(() => '0');
+    const count = parseInt(result) || 0;
+    if (count > 0) return count;
+
+    // Method 2: ss established connections for xray
+    const ssCount = await runCommand(`ss -tnp 2>/dev/null | grep xray | grep ESTAB | wc -l`).catch(() => '0');
+    return parseInt(ssCount) || 0;
+  } catch { return 0; }
+}
+
+/**
+ * Count UDP connections via ss
+ */
+async function countUdpConnections() {
+  try {
+    const result = await runCommand(`ss -unp 2>/dev/null | grep -i "udp-custom\\|UDPCustom" | wc -l`).catch(() => '0');
     return parseInt(result) || 0;
   } catch { return 0; }
 }
 
 module.exports = {
-  getXrayTraffic, getSSHTraffic, formatBytes, parseLimitToBytes,
+  getXrayTraffic, getSSHTraffic, getUdpTraffic, formatBytes, parseLimitToBytes,
   setDataLimit, getDataLimit, removeDataLimit,
-  setConnLimit, getConnLimit, countXrayConnections, countSSHConnections,
+  setConnLimit, getConnLimit, countXrayConnections, countSSHConnections, countUdpConnections,
   ensureDirs
 };

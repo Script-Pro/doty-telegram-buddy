@@ -1,6 +1,8 @@
 const path = require('path');
+const fs = require('fs');
 const { readJSON, writeJSON } = require('../utils/helpers');
 const { runCommand } = require('../utils/exec');
+const { removeClient } = require('../utils/xray');
 const config = require('../config');
 const audit = require('../utils/audit');
 
@@ -74,11 +76,10 @@ async function handleCallback(bot, chatId, data, query, pendingActions) {
     editOrSend(bot, chatId, msgId, '❌ *Sélectionnez l\'admin à supprimer:*', { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } });
   }
 
-  // Super admin direct delete — now with 2 options
+  // Super admin direct delete — with 2 options
   if (data.startsWith('admin_del_')) {
     const targetId = parseInt(data.replace('admin_del_', ''));
     if (isSuperAdmin(userId)) {
-      // Show choice: delete admin only OR delete admin + actions
       editOrSend(bot, chatId, msgId, `⚠️ *Supprimer admin \`${targetId}\`*\n\nChoisissez:`, {
         parse_mode: 'Markdown',
         reply_markup: { inline_keyboard: [
@@ -89,7 +90,6 @@ async function handleCallback(bot, chatId, data, query, pendingActions) {
         ] }
       });
     } else {
-      // Sub-admin: send request
       const pendingId = `del_${Date.now()}`;
       const pending = getPendingActions();
       pending.push({ id: pendingId, type: 'remove', targetId, requesterId: userId, requesterUsername: query.from.username || null, createdAt: new Date().toISOString() });
@@ -118,14 +118,13 @@ async function handleCallback(bot, chatId, data, query, pendingActions) {
     try { bot.sendMessage(targetId, '⚠️ Vous avez été retiré des administrateurs.'); } catch {}
   }
 
-  // Delete admin + all their created accounts
+  // Delete admin + all their created accounts (using xray.js, no jq)
   if (data.startsWith('admin_delall_')) {
     if (!isSuperAdmin(userId)) return;
     const targetId = parseInt(data.replace('admin_delall_', ''));
     editOrSend(bot, chatId, msgId, `🔄 Suppression de l'admin \`${targetId}\` et de toutes ses actions...`, { parse_mode: 'Markdown' });
     
     let deletedCount = 0;
-    // Find and delete all accounts created by this admin across all protocols
     const protocols = [
       { dir: '/etc/xray/users', proto: 'vless', xray: 'vless' },
       { dir: '/etc/xray/users-vmess', proto: 'vmess', xray: 'vmess' },
@@ -146,25 +145,28 @@ async function handleCallback(bot, chatId, data, query, pendingActions) {
             const info = JSON.parse(await runCommand(`cat ${p.dir}/${file}`));
             if (info.createdById === targetId || String(info.createdById) === String(targetId)) {
               const username = file.replace('.json', '');
-              // Remove from xray config if applicable
+              // Remove from xray config using xray.js (no jq!)
               if (p.xray) {
-                const field = p.xray === 'socks' ? 'user' : 'email';
-                await runCommand(`cd /etc/xray && jq 'del((.inbounds[] | select(.protocol=="${p.xray}")).settings.clients[] | select(.${field}=="${username}"))' config.json > tmp_xray.json && mv tmp_xray.json config.json 2>/dev/null || true`);
+                try { await removeClient(p.xray, username); } catch {}
               }
-              // Remove from udp/zivpn config
+              // Remove from UDP config
               if (p.proto === 'udp' && info.password) {
                 try {
-                  const fs = require('fs');
                   const udpConfig = JSON.parse(fs.readFileSync('/etc/UDPCustom/config.json', 'utf8'));
                   udpConfig.auth.config = udpConfig.auth.config.filter(pw => pw !== info.password);
                   fs.writeFileSync('/etc/UDPCustom/config.json', JSON.stringify(udpConfig, null, 2), 'utf8');
                 } catch {}
               }
               if (p.proto === 'zivpn' && info.password) {
-                await runCommand(`jq '.auth.config -= ["${info.password}"]' /etc/zivpn/config.json > /tmp/ziv_tmp.json && mv /tmp/ziv_tmp.json /etc/zivpn/config.json 2>/dev/null || true`);
+                try {
+                  const zivConfig = JSON.parse(fs.readFileSync('/etc/zivpn/config.json', 'utf8'));
+                  zivConfig.auth.config = zivConfig.auth.config.filter(pw => pw !== info.password);
+                  fs.writeFileSync('/etc/zivpn/config.json', JSON.stringify(zivConfig, null, 2), 'utf8');
+                } catch {}
               }
               if (p.proto === 'ssh') {
                 await runCommand(`userdel -r ${username} 2>/dev/null || true`);
+                await runCommand(`sed -i '/${username}/d' /etc/security/limits.conf 2>/dev/null || true`);
               }
               // Remove user file and limits
               await runCommand(`rm -f ${p.dir}/${file}`);
@@ -181,7 +183,6 @@ async function handleCallback(bot, chatId, data, query, pendingActions) {
     await runCommand('systemctl restart udp-custom 2>/dev/null || true');
     await runCommand('systemctl restart zivpn 2>/dev/null || true');
 
-    // Remove admin
     removeAdmin(targetId);
     audit.log(userId, 'admin', `Supprimé admin ${targetId} + ${deletedCount} comptes créés`);
 
@@ -219,14 +220,13 @@ async function handleCallback(bot, chatId, data, query, pendingActions) {
     try { bot.sendMessage(action.requesterId, `❌ Demande d'ajout de ${label} *refusée*.`, { parse_mode: 'Markdown' }); } catch {}
   }
 
-  // Approve delete — now with 2 options
+  // Approve delete — with 2 options
   if (data.startsWith('admin_approve_del_')) {
     if (!isSuperAdmin(userId)) return;
     const pendingId = data.replace('admin_approve_del_', '');
     const pending = getPendingActions();
     const action = pending.find((p) => p.id === pendingId);
     if (!action) return editOrSend(bot, chatId, msgId, '❌ Demande expirée.');
-    // Show choice
     editOrSend(bot, chatId, msgId, `⚠️ *Approuver suppression de \`${action.targetId}\`*\n\nChoisissez:`, {
       parse_mode: 'Markdown',
       reply_markup: { inline_keyboard: [
@@ -235,9 +235,7 @@ async function handleCallback(bot, chatId, data, query, pendingActions) {
         [{ text: '❌ Refuser', callback_data: `admin_reject_del_${pendingId}` }],
       ] }
     });
-    // Remove from pending
     savePendingActions(pending.filter((p) => p.id !== pendingId));
-    // Notify requester
     try { bot.sendMessage(action.requesterId, `✅ Demande de suppression de l'admin \`${action.targetId}\` *approuvée*.`, { parse_mode: 'Markdown' }); } catch {}
   }
 
