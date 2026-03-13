@@ -2,6 +2,7 @@ const { runCommand } = require('./exec');
 const { getXrayTraffic, getSSHTraffic, getUdpTraffic, getDataLimit, formatBytes, countSSHConnections, countXrayConnections, getConnLimit } = require('./traffic');
 const { removeClient } = require('./xray');
 const config = require('../config');
+const { removeUdpCredential, lockUdpSystemUser } = require('./udpCustom');
 const fs = require('fs');
 
 let checkInterval = null;
