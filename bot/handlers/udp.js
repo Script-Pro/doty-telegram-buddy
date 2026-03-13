@@ -61,8 +61,7 @@ async function getUsers() { try { const r = await runCommand(`ls ${USERS_DB}/ 2>
 
 async function countUdpOnline() {
   try {
-    const result = await runCommand(`ss -unp 2>/dev/null | grep -i udp-custom | grep ESTAB | wc -l`).catch(() => '0');
-    return parseInt(result) || 0;
+    return await countUdpConnections();
   } catch { return 0; }
 }
 
