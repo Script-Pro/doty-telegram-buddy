@@ -3,7 +3,7 @@ const { generateUUID, getExpiryDate, adjustExpiry } = require('../utils/helpers'
 const { paginatedKeyboard, getPageFromCallback } = require('../utils/pagination');
 const { getXrayTraffic, formatBytes, parseLimitToBytes, setDataLimit, getDataLimit, removeDataLimit, setConnLimit, getConnLimit } = require('../utils/traffic');
 const { autoDeleteSend, scheduleDelete } = require('../utils/autodelete');
-const { addClient, removeClient, updateClientField, renameClient, countUserConnections } = require('../utils/xray');
+const { addClient, removeClient, updateClientField, renameClient, countUserConnections, getProtocolProfiles } = require('../utils/xray');
 const audit = require('../utils/audit');
 
 const USERS_DB = '/etc/xray/users';
