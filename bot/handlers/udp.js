@@ -175,9 +175,10 @@ async function handleModifyPassword(bot, chatId, text, pending, pendingActions) 
     const info = JSON.parse(raw);
     const op = info.password;
     const np = text.trim();
-    await updateUdpConfigPassword(op, np);
+    await updateUdpCredential(pending.user, op, np);
     info.password = np;
     fs.writeFileSync(`${USERS_DB}/${pending.user}.json`, JSON.stringify(info, null, 2), 'utf8');
+    await syncUdpSystemUser(pending.user, np, info.expiry).catch(() => {});
     audit.log(pending.fromId, PROTO, `Password modifié: ${pending.user}`);
     bot.sendMessage(chatId, '✅ Password mis à jour.', { reply_markup: backBtns() });
   } catch (err) { bot.sendMessage(chatId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() }); }
