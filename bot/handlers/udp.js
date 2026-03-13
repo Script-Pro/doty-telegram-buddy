@@ -18,9 +18,7 @@ const {
   isValidLinuxUsername,
 } = require('../utils/udpCustom');
 
-// UDP Custom paths (matching udp-custom install script)
-const UDP_DIR = '/etc/UDPCustom';
-const UDP_CONFIG = '/etc/UDPCustom/config.json';
+// UDP Custom paths
 const USERS_DB = '/etc/UDPCustom/users';
 const UDP_SERVICE = 'udp-custom';
 const PROTO = 'udp';
@@ -42,82 +40,6 @@ function detailTraffic(bytes) {
   let r = bytes; const p = [];
   for (const x of u) { if (r >= x.v) { p.push(`${Math.floor(r / x.v)} ${x.n}`); r %= x.v; } }
   return p.join(' + ') || `${bytes} B`;
-}
-
-/**
- * Read UDP config safely (direct JSON parse, no jq)
- */
-function readUdpConfig() {
-  try {
-    const raw = fs.readFileSync(UDP_CONFIG, 'utf8');
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Write UDP config safely
- */
-function writeUdpConfig(config) {
-  fs.writeFileSync(UDP_CONFIG, JSON.stringify(config, null, 2), 'utf8');
-}
-
-/**
- * Ensure UDP config exists with default structure
- */
-async function ensureUdpConfig() {
-  await runCommand(`mkdir -p ${UDP_DIR} ${USERS_DB}`);
-  let config = readUdpConfig();
-  if (!config) {
-    config = {
-      listen: ":1-65535",
-      stream_buffer: 16777216,
-      obfs: "random_padding",
-      auth: {
-        mode: "passwords",
-        config: []
-      }
-    };
-    writeUdpConfig(config);
-  }
-  return config;
-}
-
-async function addToUdpConfig(password) {
-  try {
-    const config = await ensureUdpConfig();
-    if (!config.auth) config.auth = { mode: "passwords", config: [] };
-    if (!config.auth.config) config.auth.config = [];
-    if (!config.auth.config.includes(password)) {
-      config.auth.config.push(password);
-      writeUdpConfig(config);
-    }
-    await runCommand(`systemctl restart ${UDP_SERVICE} 2>/dev/null || true`);
-  } catch (e) { console.error('addToUdpConfig error:', e.message); }
-}
-
-async function removeFromUdpConfig(password) {
-  try {
-    const config = readUdpConfig();
-    if (config && config.auth && config.auth.config) {
-      config.auth.config = config.auth.config.filter(p => p !== password);
-      writeUdpConfig(config);
-    }
-    await runCommand(`systemctl restart ${UDP_SERVICE} 2>/dev/null || true`);
-  } catch {}
-}
-
-async function updateUdpConfigPassword(oldPass, newPass) {
-  try {
-    const config = readUdpConfig();
-    if (config && config.auth && config.auth.config) {
-      const idx = config.auth.config.indexOf(oldPass);
-      if (idx >= 0) config.auth.config[idx] = newPass;
-      writeUdpConfig(config);
-    }
-    await runCommand(`systemctl restart ${UDP_SERVICE} 2>/dev/null || true`);
-  } catch {}
 }
 
 function showMenu(bot, chatId, msgId) {
