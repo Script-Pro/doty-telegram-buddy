@@ -1,10 +1,22 @@
 const { runCommand, getDomain, getServerIP } = require('../utils/exec');
 const { getExpiryDate, adjustExpiry } = require('../utils/helpers');
 const { paginatedKeyboard, getPageFromCallback } = require('../utils/pagination');
-const { formatBytes, parseLimitToBytes, setDataLimit, getDataLimit, removeDataLimit, setConnLimit, getConnLimit } = require('../utils/traffic');
+const { getUdpTraffic, formatBytes, parseLimitToBytes, setDataLimit, getDataLimit, removeDataLimit, setConnLimit, getConnLimit, countUdpConnections } = require('../utils/traffic');
 const { autoDeleteSend } = require('../utils/autodelete');
 const audit = require('../utils/audit');
 const fs = require('fs');
+const {
+  ensureUdpConfig,
+  readUdpConfig,
+  addUdpCredential,
+  removeUdpCredential,
+  updateUdpCredential,
+  getUdpListenPort,
+  syncUdpSystemUser,
+  renameUdpSystemUser,
+  removeUdpSystemUser,
+  isValidLinuxUsername,
+} = require('../utils/udpCustom');
 
 // UDP Custom paths (matching udp-custom install script)
 const UDP_DIR = '/etc/UDPCustom';
