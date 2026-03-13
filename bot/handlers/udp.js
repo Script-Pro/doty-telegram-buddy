@@ -246,9 +246,10 @@ async function showDetail(bot, chatId, msgId, username) {
 
 async function showTraffic(bot, chatId, msgId, username) {
   try {
+    const traffic = await getUdpTraffic(username);
     const limit = await getDataLimit(PROTO, username);
-    let text = `━━━━━━━━━━━━━━━━━━━━━\n📊 *Trafic UDP: ${username}*\n━━━━━━━━━━━━━━━━━━━━━\n📊 Surveillance active`;
-    if (limit) { text += `\n📦 Quota: ${formatBytes(limit.limitBytes)}`; text += progressBar(0, limit.limitBytes); }
+    let text = `━━━━━━━━━━━━━━━━━━━━━\n📊 *Trafic UDP: ${username}*\n━━━━━━━━━━━━━━━━━━━━━\n⬆️ Upload: ${formatBytes(traffic.uplink)}\n⬇️ Download: ${formatBytes(traffic.downlink)}\n📊 Total: ${formatBytes(traffic.total)}\n📋 Détail: ${detailTraffic(traffic.total)}`;
+    if (limit) { text += `\n📦 Quota: ${formatBytes(limit.limitBytes)}\n📈 Utilisé: ${((traffic.total / limit.limitBytes) * 100).toFixed(1)}%`; text += progressBar(traffic.total, limit.limitBytes); }
     text += '\n━━━━━━━━━━━━━━━━━━━━━';
     editOrSend(bot, chatId, msgId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🔄 Actualiser', callback_data: `${PROTO}_trr_${username}` }], [{ text: '🔙 Retour', callback_data: `menu_${PROTO}` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } });
   } catch (err) { editOrSend(bot, chatId, msgId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() }); }
