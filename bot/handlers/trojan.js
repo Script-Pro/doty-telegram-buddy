@@ -3,7 +3,7 @@ const { generateUUID, getExpiryDate, adjustExpiry } = require('../utils/helpers'
 const { paginatedKeyboard, getPageFromCallback } = require('../utils/pagination');
 const { getXrayTraffic, formatBytes, parseLimitToBytes, setDataLimit, getDataLimit, removeDataLimit, setConnLimit, getConnLimit } = require('../utils/traffic');
 const { autoDeleteSend } = require('../utils/autodelete');
-const { addClient, removeClient, updateClientField, renameClient, countUserConnections, getProtocolProfiles } = require('../utils/xray');
+const { addClient, removeClient, updateClientField, renameClient, countUserConnections, getProtocolPorts, getProtocolPath, getProtocolGrpcService } = require('../utils/xray');
 const audit = require('../utils/audit');
 
 const USERS_DB = '/etc/xray/users-trojan';
@@ -88,11 +88,13 @@ async function handleCreateFlow(bot, chatId, text, pending, pendingActions, user
 
 async function createUser(bot, chatId, username, days, connLimit, dataLimitBytes, createdById, createdByName) {
   try {
-    const password = generateUUID().split('-')[0];
+    // Trojan uses FULL UUID as password (like doty script)
+    const password = generateUUID();
     const expiry = getExpiryDate(days);
     const domain = await getDomain();
     await runCommand(`mkdir -p ${USERS_DB}`);
 
+    // Add to ALL trojan inbounds (WS + gRPC) with email for stats tracking
     await addClient(XRAY_PROTO, { password, email: username, level: 0 });
 
     const userInfo = { username, password, expiry, protocol: PROTO, locked: false, connLimit, dataLimit: dataLimitBytes, createdBy: createdByName || String(createdById || 'unknown'), createdById: createdById || null, createdAt: new Date().toISOString() };
@@ -101,23 +103,44 @@ async function createUser(bot, chatId, username, days, connLimit, dataLimitBytes
     if (dataLimitBytes > 0) await setDataLimit(PROTO, username, dataLimitBytes);
     audit.log(createdById, PROTO, `Créé ${username}`);
 
-    const profiles = await getProtocolProfiles(XRAY_PROTO);
-    const wsTls = profiles.find(p => p.network === 'ws' && p.security === 'tls') || profiles.find(p => p.security === 'tls') || { port: 443, path: '/trojan', security: 'tls' };
-    const wsNtls = profiles.find(p => p.network === 'ws' && p.security !== 'tls') || profiles.find(p => p.security !== 'tls') || { port: 80, path: '/trojan', security: 'none' };
-    const grpc = profiles.find(p => p.network === 'grpc' && p.security === 'tls') || profiles.find(p => p.network === 'grpc') || { port: wsTls.port || 443, serviceName: 'trojan-grpc', security: 'tls' };
+    // Doty architecture: trojan WS path is /trws (NOT /trojan!)
+    const ports = getProtocolPorts(XRAY_PROTO);
+    const wsPath = getProtocolPath(XRAY_PROTO); // returns '/trws'
+    const grpcService = getProtocolGrpcService(XRAY_PROTO); // returns 'trojan-grpc'
 
-    const wsTlsPath = encodeURIComponent(wsTls.path || '/trojan');
-    const wsNtlsPath = encodeURIComponent(wsNtls.path || '/trojan');
-    const grpcService = encodeURIComponent(grpc.serviceName || 'trojan-grpc');
+    const tlsLink = `trojan://${password}@${domain}:${ports.wsTls}?type=ws&security=tls&path=${wsPath}&host=${domain}&sni=${domain}#${username}`;
+    const ntlsLink = `trojan://${password}@${domain}:${ports.wsNtls}?type=ws&security=none&path=${wsPath}&host=${domain}#${username}`;
+    const grpcLink = `trojan://${password}@${domain}:${ports.grpc}?type=grpc&security=tls&serviceName=${grpcService}&sni=${domain}#${username}`;
 
-    const wsLink = `trojan://${password}@${domain}:${wsTls.port}?type=ws&security=${wsTls.security === 'tls' ? 'tls' : 'none'}&path=${wsTlsPath}&host=${domain}&sni=${domain}#${username}`;
-    const wsNtlsLink = `trojan://${password}@${domain}:${wsNtls.port}?type=ws&security=none&path=${wsNtlsPath}&host=${domain}#${username}`;
-    const grpcLink = `trojan://${password}@${domain}:${grpc.port}?type=grpc&security=${grpc.security === 'tls' ? 'tls' : 'none'}&serviceName=${grpcService}${grpc.security === 'tls' ? `&sni=${domain}` : ''}#${username}`;
+    const msg = `┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃              TROJAN ACCOUNT DETAILS              ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┃ Username    : \`${username}\`
+┃ Expiry Date : \`${expiry}\`
+┃ Password    : \`${password}\`
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━●
+┃ Domain      : \`${domain}\`
+┃ Port TLS    : ${ports.wsTls}
+┃ Port NonTLS : ${ports.wsNtls}
+┃ Port gRPC   : ${ports.grpc}
+┃ Network     : ws
+┃ Path        : ${wsPath}
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━●
+┃ 🔢 Max Conn: ${connLimit || '♾'}
+┃ 📦 Quota: ${dataLimitBytes ? formatBytes(dataLimitBytes) : '♾'}
+┃ 👷 Créé par: ${createdByName || createdById}
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━●
+┃ TLS  :
+\`${tlsLink}\`
 
-    bot.sendMessage(chatId,
-      `━━━━━━━━━━━━━━━━━━━━━\n✅ *TROJAN Created*\n━━━━━━━━━━━━━━━━━━━━━\n👤 User: \`${username}\`\n🔑 Password: \`${password}\`\n🌐 Domain: \`${domain}\`\n🔌 Ports: TLS [${wsTls.port}] | Non-TLS [${wsNtls.port}] | gRPC [${grpc.port}]\n📁 WS Path: TLS [${wsTls.path || '/trojan'}] | Non-TLS [${wsNtls.path || '/trojan'}]\n📡 gRPC: ${grpc.serviceName || 'trojan-grpc'}\n📅 Expiry: \`${expiry}\`\n🔢 Max Conn: ${connLimit || '♾'}\n📦 Quota: ${dataLimitBytes ? formatBytes(dataLimitBytes) : '♾'}\n👷 Créé par: ${createdByName || createdById}\n━━━━━━━━━━━━━━━━━━━━━\n🔗 *WS TLS:*\n\`${wsLink}\`\n\n🔗 *WS Non-TLS:*\n\`${wsNtlsLink}\`\n\n🔗 *gRPC:*\n\`${grpcLink}\`\n━━━━━━━━━━━━━━━━━━━━━`,
-      { parse_mode: 'Markdown', reply_markup: backBtns() }
-    );
+┃ NTLS :
+\`${ntlsLink}\`
+
+┃ GRPC :
+\`${grpcLink}\`
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛`;
+
+    bot.sendMessage(chatId, msg, { parse_mode: 'Markdown', reply_markup: backBtns() });
   } catch (err) {
     bot.sendMessage(chatId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() });
   }
@@ -130,7 +153,7 @@ async function handleModifyUsername(bot, chatId, text, pending, pendingActions) 
 }
 
 async function regeneratePassword(bot, chatId, msgId, username, userId) {
-  try { const info = JSON.parse(await runCommand(`cat ${USERS_DB}/${username}.json`)); const np = generateUUID().split('-')[0]; await updateClientField(XRAY_PROTO, username, 'password', np); info.password = np; await runCommand(`echo '${JSON.stringify(info)}' > ${USERS_DB}/${username}.json`); audit.log(userId, PROTO, `Password régénéré: ${username}`); editOrSend(bot, chatId, msgId, `✅ Nouveau password: \`${np}\``, { parse_mode: 'Markdown', reply_markup: backBtns() });
+  try { const info = JSON.parse(await runCommand(`cat ${USERS_DB}/${username}.json`)); const np = generateUUID(); await updateClientField(XRAY_PROTO, username, 'password', np); info.password = np; await runCommand(`echo '${JSON.stringify(info)}' > ${USERS_DB}/${username}.json`); audit.log(userId, PROTO, `Password régénéré: ${username}`); editOrSend(bot, chatId, msgId, `✅ Nouveau password: \`${np}\``, { parse_mode: 'Markdown', reply_markup: backBtns() });
   } catch (err) { editOrSend(bot, chatId, msgId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() }); }
 }
 
@@ -150,7 +173,8 @@ async function listUsers(bot, chatId, msgId) { const users = await getUsers(); i
 
 async function showDetail(bot, chatId, msgId, username) {
   try { const info = JSON.parse(await runCommand(`cat ${USERS_DB}/${username}.json`)); const domain = await getDomain(); const traffic = await getXrayTraffic(username); const limit = await getDataLimit(PROTO, username); const conn = await getConnLimit(PROTO, username); const online = await countUserConnections(username);
-    let text = `━━━━━━━━━━━━━━━━━━━━━\n🔍 *TROJAN: ${username}*\n━━━━━━━━━━━━━━━━━━━━━\n🔑 Pass: \`${info.password}\`\n🌐 Domain: \`${domain}\`\n📅 Expiry: \`${info.expiry}\`\n🔒 Locked: ${info.locked ? 'Oui' : 'Non'}\n🔢 Max Conn: ${conn ? conn.maxConn : '♾'}\n👥 En ligne: ${online}\n📦 Quota: ${limit ? formatBytes(limit.limitBytes) : '♾'}\n⬆️ Upload: ${formatBytes(traffic.uplink)}\n⬇️ Download: ${formatBytes(traffic.downlink)}\n📊 Total: ${detailTraffic(traffic.total)}\n👷 Créé par: ${info.createdBy || 'N/A'}`;
+    const ports = getProtocolPorts(XRAY_PROTO);
+    let text = `━━━━━━━━━━━━━━━━━━━━━\n🔍 *TROJAN: ${username}*\n━━━━━━━━━━━━━━━━━━━━━\n🔑 Pass: \`${info.password}\`\n🌐 Domain: \`${domain}\`\n🔌 Ports: TLS [${ports.wsTls}] | NTLS [${ports.wsNtls}] | gRPC [${ports.grpc}]\n📅 Expiry: \`${info.expiry}\`\n🔒 Locked: ${info.locked ? 'Oui' : 'Non'}\n🔢 Max Conn: ${conn ? conn.maxConn : '♾'}\n👥 En ligne: ${online}\n📦 Quota: ${limit ? formatBytes(limit.limitBytes) : '♾'}\n⬆️ Upload: ${formatBytes(traffic.uplink)}\n⬇️ Download: ${formatBytes(traffic.downlink)}\n📊 Total: ${detailTraffic(traffic.total)}\n👷 Créé par: ${info.createdBy || 'N/A'}`;
     if (limit) text += progressBar(traffic.total, limit.limitBytes);
     text += '\n━━━━━━━━━━━━━━━━━━━━━'; editOrSend(bot, chatId, msgId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🔄 Actualiser', callback_data: `${PROTO}_det_${username}` }], [{ text: '🔙 Retour', callback_data: `menu_${PROTO}` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } });
   } catch (err) { editOrSend(bot, chatId, msgId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() }); }

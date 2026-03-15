@@ -1,6 +1,7 @@
 /**
  * Xray config manipulation utilities
  * Direct JSON manipulation with atomic writes + backup restore.
+ * Port/path mapping based on doty nginx architecture.
  */
 const { runCommand } = require('./exec');
 const fs = require('fs');
@@ -9,16 +10,68 @@ const XRAY_CONFIG = '/etc/xray/config.json';
 const XRAY_BACKUP = `${XRAY_CONFIG}.bak`;
 const XRAY_TMP = '/tmp/xray_config_tmp.json';
 
+// ═══════════════════════════════════════════
+// DOTY ARCHITECTURE - External port mapping
+// Nginx handles TLS termination and proxies
+// to internal xray ports on 127.0.0.1
+// ═══════════════════════════════════════════
+
+/**
+ * External ports exposed by nginx (doty architecture)
+ */
+function getProtocolPorts(protocol) {
+  switch (protocol) {
+    case 'vless':  return { wsTls: 443, wsNtls: 80, grpc: 443, customTls: 2087, customNtls: 2086 };
+    case 'vmess':  return { wsTls: 443, wsNtls: 80, grpc: 443, customTls: 2083, customNtls: 2082 };
+    case 'trojan': return { wsTls: 443, wsNtls: 80, grpc: 443 };
+    case 'socks':  return { wsTls: 443, wsNtls: 80, grpc: 443 };
+    case 'shadowsocks': return { wsTls: 443, wsNtls: 80, grpc: 443 };
+    default:       return { wsTls: 443, wsNtls: 80, grpc: 443 };
+  }
+}
+
+/**
+ * Default WS path per protocol (matches nginx location blocks)
+ */
+function getProtocolPath(protocol) {
+  switch (protocol) {
+    case 'vless':  return '/vless';
+    case 'vmess':  return '/vmess';
+    case 'trojan': return '/trws';
+    case 'socks':  return '/ssws';
+    case 'shadowsocks': return '/ssws';
+    default:       return `/${protocol}`;
+  }
+}
+
+/**
+ * Default gRPC service name per protocol (matches nginx grpc_pass)
+ */
+function getProtocolGrpcService(protocol) {
+  switch (protocol) {
+    case 'vless':  return 'vless-grpc';
+    case 'vmess':  return 'vmess-grpc';
+    case 'trojan': return 'trojan-grpc';
+    case 'socks':  return 'ss-grpc';
+    case 'shadowsocks': return 'ss-grpc';
+    default:       return `${protocol}-grpc`;
+  }
+}
+
+// ═══════════════════════════════════════════
+// JSON parsing utilities
+// ═══════════════════════════════════════════
+
 function parseJsonLenient(raw) {
   try {
     return JSON.parse(raw);
   } catch {
-    // Fallback for accidental comments/trailing commas in manually edited configs
     const sanitized = String(raw)
       .replace(/^\uFEFF/, '')
       .replace(/^\s*\/\/.*$/gm, '')
       .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/,\s*([}\]])/g, '$1');
+      .replace(/,\s*([}\]])/g, '$1')
+      .replace(/#[a-zA-Z]+\s*$/gm, ''); // Remove doty inline comments like #vless, #vmess
     return JSON.parse(sanitized);
   }
 }
@@ -31,9 +84,10 @@ function selectorField(protocol) {
   return protocol === 'socks' ? 'user' : 'email';
 }
 
-/**
- * Safely read and parse xray config
- */
+// ═══════════════════════════════════════════
+// Config read/write
+// ═══════════════════════════════════════════
+
 async function readXrayConfig() {
   try {
     const raw = fs.readFileSync(XRAY_CONFIG, 'utf8');
@@ -44,29 +98,23 @@ async function readXrayConfig() {
   }
 }
 
-/**
- * Safely write xray config (with backup)
- */
 async function writeXrayConfig(config) {
-  // Ensure config itself is JSON-serializable
   const payload = JSON.stringify(config, null, 2);
-  JSON.parse(payload);
+  JSON.parse(payload); // validate
 
   await runCommand(`cp ${XRAY_CONFIG} ${XRAY_BACKUP}`).catch(() => {});
   fs.writeFileSync(XRAY_TMP, payload, 'utf8');
   await runCommand(`mv ${XRAY_TMP} ${XRAY_CONFIG}`);
 }
 
-/**
- * Find first inbound by protocol (backward compatibility)
- */
+// ═══════════════════════════════════════════
+// Inbound manipulation
+// ═══════════════════════════════════════════
+
 function findInbound(config, protocol) {
   return config.inbounds ? config.inbounds.find((ib) => ib.protocol === protocol) : null;
 }
 
-/**
- * Find all inbounds by protocol
- */
 function findInbounds(config, protocol) {
   return Array.isArray(config.inbounds)
     ? config.inbounds.filter((ib) => ib.protocol === protocol)
@@ -79,7 +127,7 @@ function ensureClientsArray(inbound) {
 }
 
 /**
- * Add a client to all inbounds of a protocol
+ * Add a client to ALL inbounds of a protocol
  */
 async function addClient(protocol, clientObj) {
   try {
@@ -91,7 +139,11 @@ async function addClient(protocol, clientObj) {
     for (const inbound of inbounds) {
       ensureClientsArray(inbound);
       const alreadyExists = inbound.settings.clients.some((c) => c?.[selector] === clientObj?.[selector]);
-      if (!alreadyExists) inbound.settings.clients.push({ ...clientObj });
+      if (!alreadyExists) {
+        // Build the client object appropriate for this inbound
+        const newClient = { ...clientObj };
+        inbound.settings.clients.push(newClient);
+      }
     }
 
     await writeXrayConfig(config);
@@ -180,7 +232,7 @@ async function countUserConnections(email) {
     const parsedLogCount = parseInt(logCount, 10) || 0;
     if (parsedLogCount > 0) return parsedLogCount;
 
-    // Method 2: Xray API stats existence
+    // Method 2: Xray API stats
     try {
       const result = await runCommand(
         `xray api statsquery --server=127.0.0.1:10085 -pattern "user>>>${email}>>>traffic>>>uplink" 2>/dev/null`
@@ -188,7 +240,7 @@ async function countUserConnections(email) {
       if (result && result.includes('value')) return 1;
     } catch {}
 
-    // Method 3: Fallback to global established connections
+    // Method 3: Global connections
     const ssCount = await runCommand(`ss -tnp 2>/dev/null | grep xray | grep ESTAB | wc -l`).catch(() => '0');
     return parseInt(ssCount, 10) || 0;
   } catch {
@@ -221,7 +273,7 @@ async function getClients(protocol) {
 }
 
 /**
- * Get first inbound port for a protocol (backward compatibility)
+ * Get first inbound port for a protocol
  */
 async function getInboundPort(protocol) {
   try {
@@ -234,22 +286,41 @@ async function getInboundPort(protocol) {
 }
 
 /**
- * Get protocol inbound profiles (ws/grpc/tcp + tls/non-tls)
+ * Get protocol inbound profiles with EXTERNAL port mapping
+ * Reads internal config for paths/services, maps to nginx external ports
  */
 async function getProtocolProfiles(protocol) {
   try {
     const config = await readXrayConfig();
     const inbounds = findInbounds(config, protocol);
+    const externalPorts = getProtocolPorts(protocol);
 
     return inbounds.map((inbound) => {
       const stream = inbound.streamSettings || {};
       const ws = stream.wsSettings || {};
       const grpc = stream.grpcSettings || {};
+      const network = stream.network || 'tcp';
+
+      // Determine external port based on network type
+      let port;
+      if (network === 'grpc') {
+        port = externalPorts.grpc;
+      } else {
+        // Check if this is a custom path inbound (port 2024/2025 = custom)
+        const internalPort = parseInt(inbound.port, 10);
+        if (internalPort === 2024 || internalPort === 2025) {
+          port = externalPorts.customTls || externalPorts.wsTls;
+        } else {
+          port = externalPorts.wsTls; // Default to TLS port
+        }
+      }
+
       return {
         tag: inbound.tag || '',
-        port: inbound.port || null,
-        network: stream.network || 'tcp',
-        security: stream.security || 'none',
+        port,
+        internalPort: inbound.port,
+        network,
+        security: network === 'grpc' ? 'tls' : 'none', // nginx handles TLS
         path: ws.path || null,
         host: ws?.headers?.Host || ws.host || null,
         serviceName: grpc.serviceName || null,
@@ -273,4 +344,7 @@ module.exports = {
   getClients,
   getInboundPort,
   getProtocolProfiles,
+  getProtocolPorts,
+  getProtocolPath,
+  getProtocolGrpcService,
 };
