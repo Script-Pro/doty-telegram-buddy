@@ -1,261 +1,353 @@
-const { runCommand, getDomain } = require('../utils/exec');
+const { runCommand, getDomain, getServerIP } = require('../utils/exec');
 const { getExpiryDate, adjustExpiry } = require('../utils/helpers');
 const { paginatedKeyboard, getPageFromCallback } = require('../utils/pagination');
-const { getSSHTraffic, formatBytes, parseLimitToBytes, setDataLimit, getDataLimit, removeDataLimit, setConnLimit, getConnLimit, countSSHConnections } = require('../utils/traffic');
+const { getSSHTraffic, formatBytes, parseLimitToBytes, setDataLimit, getDataLimit, removeDataLimit, setConnLimit, getConnLimit } = require('../utils/traffic');
 const { autoDeleteSend } = require('../utils/autodelete');
-const audit = require('../utils/audit');
+const fs = require('fs');
 
 const USERS_DB = '/etc/ssh-users';
 const PROTO = 'ssh';
+const UDP_CONFIG = '/etc/UDPCustom/config.json';
 
-function editOrSend(bot, chatId, msgId, text, opts = {}) { if (msgId) return bot.editMessageText(text, { chat_id: chatId, message_id: msgId, ...opts }).catch(() => bot.sendMessage(chatId, text, opts)); return bot.sendMessage(chatId, text, opts); }
-function backBtns(extra = []) { return { inline_keyboard: [...extra, [{ text: '🔙 Retour', callback_data: `menu_${PROTO}` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] }; }
-
-function progressBar(used, total) {
-  if (!total || total <= 0) return '';
-  const pct = Math.min((used / total) * 100, 100);
-  const f = Math.round(pct / 10);
-  const fc = pct >= 80 ? '🟥' : '🟩';
-  return `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n${fc.repeat(f)}${'⬜'.repeat(10 - f)}\n📊 ${pct.toFixed(1)}% utilisé\n━━━━━━━━━━━━━━━━━━━━━━━━━━━`;
+function editOrSend(bot, chatId, msgId, text, opts = {}) {
+  if (msgId) return bot.editMessageText(text, { chat_id: chatId, message_id: msgId, ...opts }).catch(() => bot.sendMessage(chatId, text, opts));
+  return bot.sendMessage(chatId, text, opts);
 }
 
-function detailTraffic(bytes) {
-  if (bytes === 0) return '0 B';
-  const u = [{ n: 'TB', v: 1024 ** 4 }, { n: 'GB', v: 1024 ** 3 }, { n: 'MB', v: 1024 ** 2 }, { n: 'KB', v: 1024 }];
-  let r = bytes; const p = [];
-  for (const x of u) { if (r >= x.v) { p.push(`${Math.floor(r / x.v)} ${x.n}`); r %= x.v; } }
-  return p.join(' + ') || `${bytes} B`;
+function backBtns() {
+  return { inline_keyboard: [[{ text: '🔙 Retour', callback_data: `menu_${PROTO}` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] };
 }
 
 function showMenu(bot, chatId, msgId) {
-  editOrSend(bot, chatId, msgId, `━━━━━━━━━━━━━━━━━━━━━\n🔑 *SSH MENU*\n━━━━━━━━━━━━━━━━━━━━━`, {
-    parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
-      [{ text: '➕ Créer', callback_data: 'ssh_create' }, { text: '✏️ Modifier', callback_data: 'ssh_modify' }],
-      [{ text: '🔄 Renouveler', callback_data: 'ssh_renew' }, { text: '🗑 Supprimer', callback_data: 'ssh_delete' }],
-      [{ text: '📋 Liste', callback_data: 'ssh_list' }, { text: '🔍 Détails', callback_data: 'ssh_detail' }],
-      [{ text: '🔒 Lock/Unlock', callback_data: 'ssh_lockuser' }],
-      [{ text: '📊 Trafic', callback_data: 'ssh_traffic' }, { text: '📦 Quota Data', callback_data: 'ssh_quota' }],
-      [{ text: '🔢 Limite Connexion', callback_data: 'ssh_connlimit' }, { text: '👥 En ligne', callback_data: 'ssh_online' }],
-      [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }],
-    ]}
-  });
+  const text = `━━━━━━━━━━━━━━━━━━━━━\n🔑 *SSH MENU*\n━━━━━━━━━━━━━━━━━━━━━`;
+  const opts = { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [
+    [{ text: '➕ Créer', callback_data: 'ssh_create' }, { text: '✏️ Modifier', callback_data: 'ssh_modify' }],
+    [{ text: '🔄 Renouveler', callback_data: 'ssh_renew' }, { text: '🗑 Supprimer', callback_data: 'ssh_delete' }],
+    [{ text: '📋 Liste', callback_data: 'ssh_list' }, { text: '🔍 Détails', callback_data: 'ssh_detail' }],
+    [{ text: '🔒 Lock/Unlock', callback_data: 'ssh_lockuser' }],
+    [{ text: '📊 Trafic', callback_data: 'ssh_traffic' }, { text: '📦 Quota Data', callback_data: 'ssh_quota' }],
+    [{ text: '🔢 Limite Connexion', callback_data: 'ssh_connlimit' }],
+    [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }],
+  ]}};
+  editOrSend(bot, chatId, msgId, text, opts);
 }
 
 async function getUsers() {
-  try { const result = await runCommand(`ls ${USERS_DB}/ 2>/dev/null | sed 's/.json//'`); return result ? result.split('\n').filter(Boolean) : []; }
-  catch { return []; }
+  try {
+    if (!fs.existsSync(USERS_DB)) return [];
+    const files = fs.readdirSync(USERS_DB);
+    return files.filter(f => f.endsWith('.json')).map(f => f.replace('.json', ''));
+  } catch { return []; }
 }
 
 async function handleCallback(bot, chatId, data, query, pendingActions) {
-  const msgId = query?.message?.message_id; const P = 'ssh';
+  const msgId = query?.message?.message_id;
+  const P = 'ssh';
+
+  // --- GESTION DE LA PAGINATION ---
   if (data.startsWith(`${P}_pgl_`)) return showPaginatedList(bot, chatId, msgId, `${P}_del_`, `${P}_pgl_`, getPageFromCallback(data, `${P}_pgl_`));
   if (data.startsWith(`${P}_pgr_`)) return showPaginatedList(bot, chatId, msgId, `${P}_ren_`, `${P}_pgr_`, getPageFromCallback(data, `${P}_pgr_`));
   if (data.startsWith(`${P}_pgd_`)) return showPaginatedList(bot, chatId, msgId, `${P}_det_`, `${P}_pgd_`, getPageFromCallback(data, `${P}_pgd_`));
   if (data.startsWith(`${P}_pglk_`)) return showPaginatedList(bot, chatId, msgId, `${P}_lck_`, `${P}_pglk_`, getPageFromCallback(data, `${P}_pglk_`));
-  if (data.startsWith(`${P}_pgm_`)) return showPaginatedList(bot, chatId, msgId, `${P}_mod_`, `${P}_pgm_`, getPageFromCallback(data, `${P}_pgm_`));
-  if (data.startsWith(`${P}_pgt_`)) return showPaginatedList(bot, chatId, msgId, `${P}_trf_`, `${P}_pgt_`, getPageFromCallback(data, `${P}_pgt_`));
-  if (data.startsWith(`${P}_pgq_`)) return showPaginatedList(bot, chatId, msgId, `${P}_qta_`, `${P}_pgq_`, getPageFromCallback(data, `${P}_pgq_`));
-  if (data.startsWith(`${P}_pgc_`)) return showPaginatedList(bot, chatId, msgId, `${P}_cl_`, `${P}_pgc_`, getPageFromCallback(data, `${P}_pgc_`));
-  if (data.startsWith(`${P}_pgo_`)) return showPaginatedList(bot, chatId, msgId, `${P}_onl_`, `${P}_pgo_`, getPageFromCallback(data, `${P}_pgo_`));
 
+  // --- ROUTAGE DES BOUTONS DU MENU ---
   switch (data) {
     case `${P}_create`:
       editOrSend(bot, chatId, msgId, '📝 Nom d\'utilisateur SSH:');
       pendingActions[chatId] = { action: `${P}_create`, step: 'username', handler: handleCreateFlow, fromId: query.from.id, fromName: query.from.first_name || query.from.username || String(query.from.id) };
-      break;
-    case `${P}_modify`: await showPaginatedList(bot, chatId, msgId, `${P}_mod_`, `${P}_pgm_`, 0); break;
-    case `${P}_delete`: await showPaginatedList(bot, chatId, msgId, `${P}_del_`, `${P}_pgl_`, 0); break;
-    case `${P}_renew`: await showPaginatedList(bot, chatId, msgId, `${P}_ren_`, `${P}_pgr_`, 0); break;
-    case `${P}_list`: await listUsers(bot, chatId, msgId); break;
-    case `${P}_detail`: await showPaginatedList(bot, chatId, msgId, `${P}_det_`, `${P}_pgd_`, 0); break;
-    case `${P}_lockuser`: await showPaginatedList(bot, chatId, msgId, `${P}_lck_`, `${P}_pglk_`, 0); break;
-    case `${P}_traffic`: await showPaginatedList(bot, chatId, msgId, `${P}_trf_`, `${P}_pgt_`, 0); break;
-    case `${P}_quota`: await showPaginatedList(bot, chatId, msgId, `${P}_qta_`, `${P}_pgq_`, 0); break;
-    case `${P}_connlimit`: await showPaginatedList(bot, chatId, msgId, `${P}_cl_`, `${P}_pgc_`, 0); break;
-    case `${P}_online`: await showPaginatedList(bot, chatId, msgId, `${P}_onl_`, `${P}_pgo_`, 0); break;
-    default:
-      if (data.startsWith(`${P}_del_`)) { const u = data.replace(`${P}_del_`, ''); editOrSend(bot, chatId, msgId, `⚠️ Supprimer *${u}* ?`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🗑 Supprimer', callback_data: `${P}_dely_${u}` }, { text: '❌ Annuler', callback_data: `${P}_deln_${u}` }]] } }); }
-      else if (data.startsWith(`${P}_dely_`)) await deleteUser(bot, chatId, msgId, data.replace(`${P}_dely_`, ''), query.from.id);
-      else if (data.startsWith(`${P}_deln_`)) editOrSend(bot, chatId, msgId, '❌ Annulée.', { reply_markup: backBtns() });
-      else if (data.startsWith(`${P}_mod_`)) { const u = data.replace(`${P}_mod_`, ''); editOrSend(bot, chatId, msgId, `✏️ Modifier *${u}*:`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '👤 Username', callback_data: `${P}_mu_${u}` }, { text: '🔑 Password', callback_data: `${P}_mp_${u}` }], [{ text: '🔙 Retour', callback_data: `${P}_modify` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } }); }
-      else if (data.startsWith(`${P}_mu_`)) { const u = data.replace(`${P}_mu_`, ''); editOrSend(bot, chatId, msgId, `📝 Nouveau nom pour *${u}*:`, { parse_mode: 'Markdown' }); pendingActions[chatId] = { action: `${P}_modify_user`, user: u, handler: handleModifyUsername, fromId: query.from.id }; }
-      else if (data.startsWith(`${P}_mp_`)) { const u = data.replace(`${P}_mp_`, ''); editOrSend(bot, chatId, msgId, `🔑 Nouveau mot de passe pour *${u}*:`, { parse_mode: 'Markdown' }); pendingActions[chatId] = { action: `${P}_modify_pass`, user: u, handler: handleModifyPassword, fromId: query.from.id }; }
-      else if (data.startsWith(`${P}_ren_`)) { const u = data.replace(`${P}_ren_`, ''); editOrSend(bot, chatId, msgId, `🔄 *${u}*:`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '➕ Ajouter', callback_data: `${P}_ra_${u}` }, { text: '➖ Retirer', callback_data: `${P}_rs_${u}` }], [{ text: '🔙 Retour', callback_data: `${P}_renew` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } }); }
-      else if (data.startsWith(`${P}_ra_`) || data.startsWith(`${P}_rs_`)) { const add = data.startsWith(`${P}_ra_`); const u = data.replace(add ? `${P}_ra_` : `${P}_rs_`, ''); editOrSend(bot, chatId, msgId, '⏱ Unité:', { reply_markup: { inline_keyboard: [[{ text: '📅 Jours', callback_data: `${P}_ru_${add ? 'a' : 's'}_d_${u}` }], [{ text: '🕐 Heures', callback_data: `${P}_ru_${add ? 'a' : 's'}_h_${u}` }], [{ text: '⏱ Minutes', callback_data: `${P}_ru_${add ? 'a' : 's'}_m_${u}` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } }); }
-      else if (data.startsWith(`${P}_ru_`)) { const parts = data.replace(`${P}_ru_`, '').split('_'); const sign = parts[0]; const unit = parts[1]; const u = parts.slice(2).join('_'); editOrSend(bot, chatId, msgId, `🔢 Nombre de ${{ d: 'jours', h: 'heures', m: 'minutes' }[unit]}:`); pendingActions[chatId] = { action: `${P}_renew_exec`, user: u, sign, unit, handler: handleRenewFlow, fromId: query.from.id }; }
-      else if (data.startsWith(`${P}_det_`)) await showDetail(bot, chatId, msgId, data.replace(`${P}_det_`, ''));
-      else if (data.startsWith(`${P}_lck_`)) await toggleLock(bot, chatId, msgId, data.replace(`${P}_lck_`, ''), query.from.id);
-      else if (data.startsWith(`${P}_trf_`) || data.startsWith(`${P}_trr_`)) { const pf = data.startsWith(`${P}_trf_`) ? `${P}_trf_` : `${P}_trr_`; await showTraffic(bot, chatId, msgId, data.replace(pf, '')); }
-      else if (data.startsWith(`${P}_qta_`)) { const u = data.replace(`${P}_qta_`, ''); editOrSend(bot, chatId, msgId, `📦 Limite données pour *${u}* (ex: \`5GB\`, \`0\`=illimité):`, { parse_mode: 'Markdown' }); pendingActions[chatId] = { action: `${P}_quota_set`, user: u, handler: handleQuotaFlow, fromId: query.from.id }; }
-      else if (data.startsWith(`${P}_cl_`)) { const u = data.replace(`${P}_cl_`, ''); editOrSend(bot, chatId, msgId, `🔢 Max connexions pour *${u}*:`, { parse_mode: 'Markdown' }); pendingActions[chatId] = { action: `${P}_connlimit_set`, user: u, handler: handleConnLimitFlow, fromId: query.from.id }; }
-      else if (data.startsWith(`${P}_onl_`)) await showOnline(bot, chatId, msgId, data.replace(`${P}_onl_`, ''));
+      return;
+    case `${P}_list`: return await listUsers(bot, chatId, msgId);
+    case `${P}_delete`: return await showPaginatedList(bot, chatId, msgId, `${P}_del_`, `${P}_pgl_`, 0);
+    case `${P}_renew`: return await showPaginatedList(bot, chatId, msgId, `${P}_ren_`, `${P}_pgr_`, 0);
+    case `${P}_detail`: return await showPaginatedList(bot, chatId, msgId, `${P}_det_`, `${P}_pgd_`, 0);
+    case `${P}_lockuser`: return await showPaginatedList(bot, chatId, msgId, `${P}_lck_`, `${P}_pglk_`, 0);
+    case `${P}_modify`: 
+    case `${P}_traffic`: 
+    case `${P}_quota`: 
+    case `${P}_connlimit`: 
+      return editOrSend(bot, chatId, msgId, '🚧 Fonctionnalité en cours de développement...', { reply_markup: backBtns() });
+  }
+
+  // --- ACTIONS SUR LES UTILISATEURS SÉLECTIONNÉS ---
+  
+  // 1. SUPPRIMER
+  if (data.startsWith(`${P}_del_`)) {
+    const user = data.replace(`${P}_del_`, '');
+    editOrSend(bot, chatId, msgId, `⚠️ Êtes-vous sûr de vouloir supprimer *${user}* ?`, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '✅ Oui, Supprimer', callback_data: `${P}_dely_${user}` }, { text: '❌ Annuler', callback_data: `menu_${PROTO}` }]] } });
+  }
+  else if (data.startsWith(`${P}_dely_`)) {
+    await deleteUser(bot, chatId, msgId, data.replace(`${P}_dely_`, ''));
+  }
+  
+  // 2. RENOUVELER
+  else if (data.startsWith(`${P}_ren_`)) {
+    const user = data.replace(`${P}_ren_`, '');
+    editOrSend(bot, chatId, msgId, `🔄 Combien de jours ajouter à *${user}* ?`);
+    pendingActions[chatId] = { action: `${P}_renew`, step: 'days', username: user, handler: handleRenewFlow };
+  }
+  
+  // 3. LOCK / UNLOCK
+  else if (data.startsWith(`${P}_lck_`)) {
+    await toggleLockUser(bot, chatId, msgId, data.replace(`${P}_lck_`, ''));
+  }
+  
+  // 4. DÉTAILS
+  else if (data.startsWith(`${P}_det_`)) {
+    await showUserDetails(bot, chatId, msgId, data.replace(`${P}_det_`, ''));
   }
 }
 
-async function showPaginatedList(bot, chatId, msgId, prefix, pagePrefix, page) { const users = await getUsers(); if (!users.length) { editOrSend(bot, chatId, msgId, '📋 Aucun utilisateur.', { reply_markup: backBtns() }); return; } editOrSend(bot, chatId, msgId, '👤 Sélectionnez:', paginatedKeyboard(users, prefix, pagePrefix, page, `menu_${PROTO}`)); }
+async function showPaginatedList(bot, chatId, msgId, prefix, pagePrefix, page) {
+  const users = await getUsers();
+  if (!users.length) { editOrSend(bot, chatId, msgId, '📋 Aucun utilisateur trouvé.', { reply_markup: backBtns() }); return; }
+  editOrSend(bot, chatId, msgId, '👤 Sélectionnez un utilisateur :', paginatedKeyboard(users, prefix, pagePrefix, page, `menu_${PROTO}`));
+}
 
-async function handleCreateFlow(bot, chatId, text, pending, pendingActions, userMsgId) {
-  if (pending.step === 'username') { pending.username = text.trim(); pending.step = 'password'; autoDeleteSend(bot, chatId, '🔑 Mot de passe:', {}, userMsgId); }
-  else if (pending.step === 'password') { pending.password = text.trim(); pending.step = 'days'; autoDeleteSend(bot, chatId, '📅 Durée (jours):', {}, userMsgId); }
+// ==========================================
+// FLUX DE CRÉATION
+// ==========================================
+async function handleCreateFlow(bot, chatId, text, pending, pendingActions) {
+  if (pending.step === 'username') { pending.username = text.trim(); pending.step = 'password'; autoDeleteSend(bot, chatId, '🔑 Mot de passe:'); }
+  else if (pending.step === 'password') { pending.password = text.trim(); pending.step = 'days'; autoDeleteSend(bot, chatId, '📅 Durée (jours):'); }
   else if (pending.step === 'days') {
     const days = parseInt(text);
-    if (isNaN(days) || days < 1) { delete pendingActions[chatId]; return editOrSend(bot, chatId, null, '❌ Nombre de jours invalide.', { reply_markup: { inline_keyboard: [[{ text: '🔄 Réessayer', callback_data: `${PROTO}_create` }, { text: '❌ Annuler', callback_data: `menu_${PROTO}` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } }); }
-    pending.days = days; pending.step = 'connlimit'; autoDeleteSend(bot, chatId, '🔢 Limite connexions (0=illimité):', {}, userMsgId);
+    if (isNaN(days) || days < 1) { autoDeleteSend(bot, chatId, '❌ Invalide.'); delete pendingActions[chatId]; return; }
+    pending.days = days; pending.step = 'connlimit';
+    autoDeleteSend(bot, chatId, '🔢 Limite connexions (0 = illimité):');
   }
   else if (pending.step === 'connlimit') {
     const limit = parseInt(text);
-    if (isNaN(limit) || limit < 0) { delete pendingActions[chatId]; return editOrSend(bot, chatId, null, '❌ Limite invalide.', { reply_markup: { inline_keyboard: [[{ text: '🔄 Réessayer', callback_data: `${PROTO}_create` }, { text: '❌ Annuler', callback_data: `menu_${PROTO}` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } }); }
-    pending.connLimit = limit; pending.step = 'datalimit'; autoDeleteSend(bot, chatId, '📦 Limite données (ex: `5GB`, `0`=illimité):', { parse_mode: 'Markdown' }, userMsgId);
+    if (isNaN(limit) || limit < 0) { autoDeleteSend(bot, chatId, '❌ Invalide.'); delete pendingActions[chatId]; return; }
+    pending.connLimit = limit; pending.step = 'datalimit';
+    autoDeleteSend(bot, chatId, '📦 Limite données (ex: `5GB`, `0` = illimité):', { parse_mode: 'Markdown' });
   }
   else if (pending.step === 'datalimit') {
-    delete pendingActions[chatId]; let dataLimitBytes = 0;
-    if (text.trim() !== '0') { dataLimitBytes = parseLimitToBytes(text.trim()); if (dataLimitBytes === null) return editOrSend(bot, chatId, null, '❌ Format invalide. Ex: 5GB, 500MB', { reply_markup: { inline_keyboard: [[{ text: '🔄 Réessayer', callback_data: `${PROTO}_create` }, { text: '❌ Annuler', callback_data: `menu_${PROTO}` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } }); }
+    delete pendingActions[chatId];
+    let dataLimitBytes = 0;
+    if (text.trim() !== '0') { 
+        dataLimitBytes = parseLimitToBytes(text.trim()); 
+        if (dataLimitBytes === null) { autoDeleteSend(bot, chatId, '❌ Format invalide.'); return; } 
+    }
     await createUser(bot, chatId, pending.username, pending.password, pending.days, pending.connLimit, dataLimitBytes, pending.fromId, pending.fromName);
   }
 }
 
 async function createUser(bot, chatId, username, password, days, connLimit, dataLimitBytes, createdById, createdByName) {
   try {
-    const expiry = getExpiryDate(days); const domain = await getDomain();
+    const expiry = getExpiryDate(days);
+    const domain = await getDomain();
+    const ip = await getServerIP();
+    
+    // Création du compte SSH Linux
     await runCommand(`useradd -e $(date -d "+${days} days" +%Y-%m-%d) -s /bin/false -M ${username} 2>/dev/null || true`);
     await runCommand(`echo "${username}:${password}" | chpasswd`);
-    // TMY-SSH-PRO: use limits.conf for connection limit
-    if (connLimit > 0) await runCommand(`sed -i '/${username}/d' /etc/security/limits.conf 2>/dev/null; echo "${username} hard maxlogins ${connLimit}" >> /etc/security/limits.conf`);
-    await runCommand(`mkdir -p ${USERS_DB}`);
-    const userInfo = { username, password, expiry, locked: false, connLimit, dataLimit: dataLimitBytes, createdBy: createdByName || String(createdById || 'unknown'), createdById: createdById || null, createdAt: new Date().toISOString() };
-    await runCommand(`echo '${JSON.stringify(userInfo)}' > ${USERS_DB}/${username}.json`);
+    
+    // Application de la limite de connexion système
+    if (connLimit > 0) {
+        await runCommand(`echo "${username} hard maxlogins ${connLimit}" >> /etc/security/limits.conf`);
+    }
+
+    if (!fs.existsSync(USERS_DB)) fs.mkdirSync(USERS_DB, { recursive: true });
+    
+    const userInfo = { username, password, expiry, locked: false, connLimit, dataLimit: dataLimitBytes, createdBy: createdByName || String(createdById || 'unknown'), createdById: createdById || null };
+    fs.writeFileSync(`${USERS_DB}/${username}.json`, JSON.stringify(userInfo, null, 2), 'utf8');
+    
     if (connLimit > 0) await setConnLimit(PROTO, username, connLimit);
     if (dataLimitBytes > 0) await setDataLimit(PROTO, username, dataLimitBytes);
-    audit.log(createdById, PROTO, `Créé ${username} (${days}j, conn:${connLimit || '♾'}, data:${dataLimitBytes ? formatBytes(dataLimitBytes) : '♾'})`);
 
-    bot.sendMessage(chatId,
-      `━━━━━━━━━━━━━━━━━━━━━\n✅ *SSH Account Created*\n━━━━━━━━━━━━━━━━━━━━━\n👤 User: \`${username}\`\n🔑 Pass: \`${password}\`\n🌐 Domain: \`${domain}\`\n📅 Expiry: \`${expiry}\`\n🔢 Max Conn: ${connLimit || '♾'}\n📦 Quota: ${dataLimitBytes ? formatBytes(dataLimitBytes) : '♾'}\n👷 Créé par: ${createdByName || createdById}\n━━━━━━━━━━━━━━━━━━━━━\n🔗 *WebSocket TLS:* \`wss://${domain}:443\`\n📂 Path: \`/ssh-ws\`\n🔗 *WebSocket NTLS:* \`ws://${domain}:80\`\n📂 Path: \`/ssh-ws\`\n━━━━━━━━━━━━━━━━━━━━━`,
-      { parse_mode: 'Markdown', reply_markup: backBtns() }
-    );
-  } catch (err) { bot.sendMessage(chatId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() }); }
+    // INTÉGRATION AUTOMATIQUE UDP CUSTOM
+    try {
+        let udpConf = { auth: { mode: "passwords", config: [] } };
+        if (fs.existsSync(UDP_CONFIG)) {
+            udpConf = JSON.parse(fs.readFileSync(UDP_CONFIG, 'utf8'));
+        }
+        if (!udpConf.auth.config.includes(password)) {
+            udpConf.auth.config.push(password);
+            fs.writeFileSync(UDP_CONFIG, JSON.stringify(udpConf, null, 2), 'utf8');
+            await runCommand('systemctl restart udp-custom 2>/dev/null || true');
+        }
+    } catch(e) { console.error("Erreur auto UDP:", e); }
+
+    // Récupération clés SlowDNS & NS
+    let slowDnsPub = "N/A";
+    let nsDomain = "N/A";
+    try { slowDnsPub = (await runCommand('cat /etc/slowdns/server.pub 2>/dev/null')).trim() || "N/A"; } catch(e){}
+    try { nsDomain = (await runCommand('cat /etc/slowdns/nsdomain 2>/dev/null')).trim() || "N/A"; } catch(e){}
+
+    // FORMAT DOTYWRT ASCII
+    const msg = `\`\`\`text
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃               SSH ACCOUNT DETAILS                ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃ Username    : ${username}
+┃ Password    : ${password}
+┃ Expiry Date : ${expiry}
+┃ Host/IP     : ${ip}
+┃ Domain      : ${domain}
+┃ NS Domain   : ${nsDomain}
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━●
+┃ OpenSSH      : 22
+┃ Dropbear     : 109, 143
+┃ Stunnel      : 447, 777
+┃ WS NTLS      : 80
+┃ WS TLS       : 443
+┃ UDPGW        : 7100–7900
+┃ Squid        : 3128, 8080
+┃ OpenVPN      : TCP 1194, SSL 2200, OHP 8000
+┃ Slow DNS     : 22,53,5300,80,443
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━●
+┃ UDP Custom
+┃ ${domain}:1-65535@${username}:${password}
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━●
+┃ Slow DNS
+┃ PUB : ${slowDnsPub}
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━●
+┃ OpenVPN File
+┃ Download     : https://${domain}:2081
+●━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━●
+┃ Payload
+┃ GET / HTTP/1.1[crlf]Host: ${domain}[crlf]Upgrade: websocket[crlf][crlf]
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+\`\`\``;
+
+    bot.sendMessage(chatId, msg, { parse_mode: 'MarkdownV2', reply_markup: backBtns() });
+
+  } catch (err) { bot.sendMessage(chatId, `❌ Erreur lors de la création SSH: ${err.message}`); }
 }
 
-async function handleModifyUsername(bot, chatId, text, pending, pendingActions) {
-  delete pendingActions[chatId]; const newUser = text.trim();
-  if (!newUser || newUser.length < 2) return editOrSend(bot, chatId, null, '❌ Nom trop court.', { reply_markup: { inline_keyboard: [[{ text: '🔄 Réessayer', callback_data: `${PROTO}_mu_${pending.user}` }, { text: '❌ Annuler', callback_data: `menu_${PROTO}` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } });
-  try {
-    const info = JSON.parse(await runCommand(`cat ${USERS_DB}/${pending.user}.json`));
-    await runCommand(`usermod -l ${newUser} ${pending.user} 2>/dev/null || true`);
-    info.username = newUser;
-    await runCommand(`echo '${JSON.stringify(info)}' > ${USERS_DB}/${newUser}.json && rm -f ${USERS_DB}/${pending.user}.json`);
-    audit.log(pending.fromId, PROTO, `Modifié: ${pending.user} → ${newUser}`);
-    bot.sendMessage(chatId, `✅ *${pending.user}* → *${newUser}*`, { parse_mode: 'Markdown', reply_markup: backBtns() });
-  } catch (err) { bot.sendMessage(chatId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() }); }
-}
-
-async function handleModifyPassword(bot, chatId, text, pending, pendingActions) {
-  delete pendingActions[chatId]; const newPass = text.trim();
-  try {
-    await runCommand(`echo "${pending.user}:${newPass}" | chpasswd`);
-    const info = JSON.parse(await runCommand(`cat ${USERS_DB}/${pending.user}.json`));
-    info.password = newPass;
-    await runCommand(`echo '${JSON.stringify(info)}' > ${USERS_DB}/${pending.user}.json`);
-    audit.log(pending.fromId, PROTO, `Password modifié: ${pending.user}`);
-    bot.sendMessage(chatId, `✅ Mot de passe de *${pending.user}* mis à jour.`, { parse_mode: 'Markdown', reply_markup: backBtns() });
-  } catch (err) { bot.sendMessage(chatId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() }); }
-}
-
-async function handleRenewFlow(bot, chatId, text, pending, pendingActions) {
-  delete pendingActions[chatId]; const amount = parseInt(text);
-  if (isNaN(amount) || amount < 1) return editOrSend(bot, chatId, null, '❌ Nombre invalide.', { reply_markup: { inline_keyboard: [[{ text: '🔄 Réessayer', callback_data: `${PROTO}_ren_${pending.user}` }, { text: '❌ Annuler', callback_data: `menu_${PROTO}` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } });
-  try {
-    const info = JSON.parse(await runCommand(`cat ${USERS_DB}/${pending.user}.json`));
-    const ne = adjustExpiry(info.expiry, pending.sign === 's' ? -amount : amount, { d: 'days', h: 'hours', m: 'minutes' }[pending.unit]);
-    info.expiry = ne; await runCommand(`echo '${JSON.stringify(info)}' > ${USERS_DB}/${pending.user}.json`);
-    if (pending.unit === 'd' && pending.sign === 'a') {
-      await runCommand(`chage -E $(date -d "+${amount} days" +%Y-%m-%d) ${pending.user} 2>/dev/null || true`);
-    }
-    audit.log(pending.fromId, PROTO, `Renouvelé ${pending.user}`);
-    bot.sendMessage(chatId, `✅ SSH *${pending.user}* → *${ne}*`, { parse_mode: 'Markdown', reply_markup: backBtns() });
-  } catch (err) { bot.sendMessage(chatId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() }); }
-}
-
-async function deleteUser(bot, chatId, msgId, username, userId) {
-  try {
-    await runCommand(`userdel -f ${username} 2>/dev/null || true`);
-    await runCommand(`rm -f ${USERS_DB}/${username}.json`);
-    await removeDataLimit(PROTO, username);
-    await runCommand(`sed -i '/${username}/d' /etc/security/limits.conf 2>/dev/null || true`);
-    audit.log(userId, PROTO, `Supprimé ${username}`);
-    editOrSend(bot, chatId, msgId, `✅ SSH *${username}* supprimé.`, { parse_mode: 'Markdown', reply_markup: backBtns() });
-  } catch (err) { editOrSend(bot, chatId, msgId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() }); }
-}
+// ==========================================
+// ACTIONS (LISTE, DELETE, RENEW, LOCK, DETAILS)
+// ==========================================
 
 async function listUsers(bot, chatId, msgId) {
   const users = await getUsers();
-  if (!users.length) { editOrSend(bot, chatId, msgId, '📋 Aucun utilisateur SSH.', { reply_markup: backBtns() }); return; }
-  let text = '━━━━━━━━━━━━━━━━━━━━━\n📋 *SSH Users*\n━━━━━━━━━━━━━━━━━━━━━\n';
-  for (const u of users) { try { const d = JSON.parse(await runCommand(`cat ${USERS_DB}/${u}.json`)); text += `👤 ${u} | 📅 ${d.expiry} | ${d.locked ? '🔒' : '🔓'}\n`; } catch { text += `👤 ${u}\n`; } }
+  if (!users.length) return editOrSend(bot, chatId, msgId, '📋 Aucun utilisateur SSH.', { reply_markup: backBtns() });
+  
+  let text = `━━━━━━━━━━━━━━━━━━━━━\n📋 *SSH Users*\n━━━━━━━━━━━━━━━━━━━━━\n`;
+  for (const u of users) { 
+    try { 
+      const d = JSON.parse(fs.readFileSync(`${USERS_DB}/${u}.json`, 'utf8')); 
+      text += `👤 ${u} | 📅 ${d.expiry} | ${d.locked ? '🔒' : '🔓'}\n`; 
+    } catch { 
+      text += `👤 ${u} (Erreur de lecture)\n`; 
+    } 
+  }
   editOrSend(bot, chatId, msgId, text, { parse_mode: 'Markdown', reply_markup: backBtns() });
 }
 
-async function showDetail(bot, chatId, msgId, username) {
+async function deleteUser(bot, chatId, msgId, username) {
   try {
-    const info = JSON.parse(await runCommand(`cat ${USERS_DB}/${username}.json`));
-    const domain = await getDomain(); const traffic = await getSSHTraffic(username);
-    const limit = await getDataLimit(PROTO, username); const conn = await getConnLimit(PROTO, username);
-    const activeConn = await countSSHConnections(username);
-    let text = `━━━━━━━━━━━━━━━━━━━━━\n🔍 *SSH: ${username}*\n━━━━━━━━━━━━━━━━━━━━━\n🔑 Pass: \`${info.password}\`\n🌐 Domain: \`${domain}\`\n📅 Expiry: \`${info.expiry}\`\n🔒 Locked: ${info.locked ? 'Oui' : 'Non'}\n🔢 Max Conn: ${conn ? conn.maxConn : '♾'}\n👥 En ligne: ${activeConn}\n📦 Quota: ${limit ? formatBytes(limit.limitBytes) : '♾'}\n⬇️ Trafic: ${formatBytes(traffic.total)}\n📋 Détail: ${detailTraffic(traffic.total)}\n👷 Créé par: ${info.createdBy || 'N/A'}`;
-    if (limit) text += progressBar(traffic.total, limit.limitBytes);
-    text += '\n━━━━━━━━━━━━━━━━━━━━━';
-    editOrSend(bot, chatId, msgId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🔄 Actualiser', callback_data: `${PROTO}_det_${username}` }], [{ text: '🔙 Retour', callback_data: `menu_${PROTO}` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } });
-  } catch (err) { editOrSend(bot, chatId, msgId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() }); }
+    // 1. Suppression du système Linux
+    await runCommand(`userdel -f ${username} 2>/dev/null || true`);
+    
+    // 2. Retrait de UDP Custom
+    try {
+        if (fs.existsSync(UDP_CONFIG) && fs.existsSync(`${USERS_DB}/${username}.json`)) {
+            const userInfo = JSON.parse(fs.readFileSync(`${USERS_DB}/${username}.json`, 'utf8'));
+            let udpConf = JSON.parse(fs.readFileSync(UDP_CONFIG, 'utf8'));
+            udpConf.auth.config = udpConf.auth.config.filter(pwd => pwd !== userInfo.password);
+            fs.writeFileSync(UDP_CONFIG, JSON.stringify(udpConf, null, 2), 'utf8');
+            await runCommand('systemctl restart udp-custom 2>/dev/null || true');
+        }
+    } catch(e) { console.error("Erreur suppression UDP:", e); }
+
+    // 3. Suppression fichiers de la DB
+    if (fs.existsSync(`${USERS_DB}/${username}.json`)) {
+        fs.unlinkSync(`${USERS_DB}/${username}.json`);
+    }
+    await removeDataLimit(PROTO, username);
+    
+    editOrSend(bot, chatId, msgId, `✅ Compte SSH *${username}* supprimé avec succès.`, { parse_mode: 'Markdown', reply_markup: backBtns() });
+  } catch (err) {
+    editOrSend(bot, chatId, msgId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() });
+  }
 }
 
-async function toggleLock(bot, chatId, msgId, username, userId) {
+async function handleRenewFlow(bot, chatId, text, pending, pendingActions) {
+    const days = parseInt(text);
+    if (isNaN(days) || days < 1) { 
+        bot.sendMessage(chatId, '❌ Invalide. Annulation.'); 
+        delete pendingActions[chatId]; 
+        return; 
+    }
+    
+    const username = pending.username;
+    delete pendingActions[chatId];
+
+    try {
+        const userInfoPath = `${USERS_DB}/${username}.json`;
+        if (!fs.existsSync(userInfoPath)) throw new Error("Utilisateur introuvable dans la base de données.");
+        
+        const userInfo = JSON.parse(fs.readFileSync(userInfoPath, 'utf8'));
+        
+        // Calcul de la nouvelle date (ajouter à la date actuelle ou à l'expiration si pas encore expiré)
+        const expDate = new Date(userInfo.expiry);
+        const now = new Date();
+        const baseDate = (expDate > now) ? expDate : now;
+        baseDate.setDate(baseDate.getDate() + days);
+        const newExpiryStr = baseDate.toISOString().split('T')[0];
+        
+        // Mise à jour système Linux
+        await runCommand(`usermod -e ${newExpiryStr} ${username} 2>/dev/null`);
+        
+        // Sauvegarde
+        userInfo.expiry = newExpiryStr;
+        fs.writeFileSync(userInfoPath, JSON.stringify(userInfo, null, 2), 'utf8');
+
+        bot.sendMessage(chatId, `✅ Le compte *${username}* a été renouvelé.\nNouvelle date d'expiration : ${newExpiryStr}`, { parse_mode: 'Markdown', reply_markup: backBtns() });
+
+    } catch (err) {
+        bot.sendMessage(chatId, `❌ Erreur lors du renouvellement: ${err.message}`, { reply_markup: backBtns() });
+    }
+}
+
+async function toggleLockUser(bot, chatId, msgId, username) {
   try {
-    const info = JSON.parse(await runCommand(`cat ${USERS_DB}/${username}.json`)); const nl = !info.locked;
-    info.locked = nl; await runCommand(`echo '${JSON.stringify(info)}' > ${USERS_DB}/${username}.json`);
-    if (nl) { await runCommand(`passwd -l ${username}`); await runCommand(`pkill -u ${username} 2>/dev/null || true`); }
-    else await runCommand(`passwd -u ${username}`);
-    audit.log(userId, PROTO, `${nl ? '🔒' : '🔓'} ${username}`);
-    editOrSend(bot, chatId, msgId, `✅ SSH *${username}* ${nl ? '🔒' : '🔓'}`, { parse_mode: 'Markdown', reply_markup: backBtns() });
-  } catch (err) { editOrSend(bot, chatId, msgId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() }); }
+    const userInfoPath = `${USERS_DB}/${username}.json`;
+    if (!fs.existsSync(userInfoPath)) throw new Error("Utilisateur introuvable.");
+    
+    const userInfo = JSON.parse(fs.readFileSync(userInfoPath, 'utf8'));
+    const isCurrentlyLocked = userInfo.locked;
+    
+    if (isCurrentlyLocked) {
+        await runCommand(`usermod -U ${username} 2>/dev/null`); // Débloquer sur Linux
+        userInfo.locked = false;
+    } else {
+        await runCommand(`usermod -L ${username} 2>/dev/null`); // Bloquer sur Linux
+        await runCommand(`killall -u ${username} 2>/dev/null || true`); // Déconnecter
+        userInfo.locked = true;
+    }
+    
+    fs.writeFileSync(userInfoPath, JSON.stringify(userInfo, null, 2), 'utf8');
+    
+    editOrSend(bot, chatId, msgId, `✅ Compte *${username}* ${userInfo.locked ? 'bloqué 🔒' : 'débloqué 🔓'}.`, { parse_mode: 'Markdown', reply_markup: backBtns() });
+  } catch (err) {
+    editOrSend(bot, chatId, msgId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() });
+  }
 }
 
-async function showTraffic(bot, chatId, msgId, username) {
-  try {
-    const traffic = await getSSHTraffic(username); const limit = await getDataLimit(PROTO, username);
-    let text = `━━━━━━━━━━━━━━━━━━━━━\n📊 *Trafic SSH: ${username}*\n━━━━━━━━━━━━━━━━━━━━━\n⬇️ Trafic: ${formatBytes(traffic.total)}\n📋 Détail: ${detailTraffic(traffic.total)}`;
-    if (limit) { text += `\n📦 Quota: ${formatBytes(limit.limitBytes)}\n📈 Utilisé: ${((traffic.total / limit.limitBytes) * 100).toFixed(1)}%`; text += progressBar(traffic.total, limit.limitBytes); }
-    text += '\n━━━━━━━━━━━━━━━━━━━━━';
-    editOrSend(bot, chatId, msgId, text, { parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🔄 Actualiser', callback_data: `${PROTO}_trr_${username}` }], [{ text: '🔙 Retour', callback_data: `menu_${PROTO}` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } });
-  } catch (err) { editOrSend(bot, chatId, msgId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() }); }
-}
-
-async function showOnline(bot, chatId, msgId, username) {
-  try {
-    const online = await countSSHConnections(username); const conn = await getConnLimit(PROTO, username);
-    editOrSend(bot, chatId, msgId, `━━━━━━━━━━━━━━━━━━━━━\n👥 *En ligne SSH: ${username}*\n━━━━━━━━━━━━━━━━━━━━━\n👥 Connectés: ${online}\n🔢 Max: ${conn ? conn.maxConn : '♾'}\n━━━━━━━━━━━━━━━━━━━━━`, {
-      parse_mode: 'Markdown', reply_markup: { inline_keyboard: [[{ text: '🔄 Actualiser', callback_data: `${PROTO}_onl_${username}` }], [{ text: '🔙 Retour', callback_data: `menu_${PROTO}` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] }
-    });
-  } catch (err) { editOrSend(bot, chatId, msgId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() }); }
-}
-
-async function handleQuotaFlow(bot, chatId, text, pending, pendingActions) {
-  delete pendingActions[chatId];
-  if (text.trim() === '0') { await removeDataLimit(PROTO, pending.user); audit.log(pending.fromId, PROTO, `Quota supprimé: ${pending.user}`); return bot.sendMessage(chatId, '✅ Quota supprimé', { reply_markup: backBtns() }); }
-  const bytes = parseLimitToBytes(text.trim());
-  if (!bytes) return editOrSend(bot, chatId, null, '❌ Format invalide. Ex: 5GB, 500MB', { reply_markup: { inline_keyboard: [[{ text: '🔄 Réessayer', callback_data: `${PROTO}_qta_${pending.user}` }, { text: '❌ Annuler', callback_data: `menu_${PROTO}` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } });
-  await setDataLimit(PROTO, pending.user, bytes); audit.log(pending.fromId, PROTO, `Quota: ${pending.user}=${formatBytes(bytes)}`);
-  bot.sendMessage(chatId, `✅ Quota *${pending.user}*: ${formatBytes(bytes)}`, { parse_mode: 'Markdown', reply_markup: backBtns() });
-}
-
-async function handleConnLimitFlow(bot, chatId, text, pending, pendingActions) {
-  delete pendingActions[chatId]; const max = parseInt(text);
-  if (isNaN(max) || max < 0) return editOrSend(bot, chatId, null, '❌ Invalide.', { reply_markup: { inline_keyboard: [[{ text: '🔄 Réessayer', callback_data: `${PROTO}_cl_${pending.user}` }, { text: '❌ Annuler', callback_data: `menu_${PROTO}` }], [{ text: '🏠 ACCUEIL', callback_data: 'back_main' }]] } });
-  await setConnLimit(PROTO, pending.user, max);
-  // Update limits.conf for SSH
-  if (max > 0) await runCommand(`sed -i '/${pending.user}/d' /etc/security/limits.conf 2>/dev/null; echo "${pending.user} hard maxlogins ${max}" >> /etc/security/limits.conf`).catch(() => {});
-  else await runCommand(`sed -i '/${pending.user}/d' /etc/security/limits.conf 2>/dev/null || true`).catch(() => {});
-  try { const info = JSON.parse(await runCommand(`cat ${USERS_DB}/${pending.user}.json`)); info.connLimit = max; await runCommand(`echo '${JSON.stringify(info)}' > ${USERS_DB}/${pending.user}.json`); } catch {}
-  audit.log(pending.fromId, PROTO, `Limite conn: ${pending.user}=${max || '♾'}`);
-  bot.sendMessage(chatId, `✅ Limite *${pending.user}*: ${max || '♾'}`, { parse_mode: 'Markdown', reply_markup: backBtns() });
+async function showUserDetails(bot, chatId, msgId, username) {
+    try {
+        const userInfoPath = `${USERS_DB}/${username}.json`;
+        if (!fs.existsSync(userInfoPath)) throw new Error("Utilisateur introuvable.");
+        
+        const userInfo = JSON.parse(fs.readFileSync(userInfoPath, 'utf8'));
+        const activeConn = await countSSHConnections(username) || 0;
+        const limitStr = userInfo.connLimit > 0 ? userInfo.connLimit : 'Illimité';
+        
+        let text = `━━━━━━━━━━━━━━━━━━━━━\n🔍 *Détails SSH: ${username}*\n━━━━━━━━━━━━━━━━━━━━━\n`;
+        text += `🔑 Mot de passe : \`${userInfo.password}\`\n`;
+        text += `📅 Expiration : ${userInfo.expiry}\n`;
+        text += `🔒 Statut : ${userInfo.locked ? 'Bloqué' : 'Actif'}\n`;
+        text += `🔢 Limite Connexion : ${limitStr}\n`;
+        text += `👥 En ligne actuellement : ${activeConn}\n`;
+        if (userInfo.dataLimit) text += `📦 Limite Data : ${formatBytes(userInfo.dataLimit)}\n`;
+        
+        editOrSend(bot, chatId, msgId, text, { parse_mode: 'Markdown', reply_markup: backBtns() });
+    } catch(err) {
+        editOrSend(bot, chatId, msgId, `❌ Erreur: ${err.message}`, { reply_markup: backBtns() });
+    }
 }
 
 module.exports = { showMenu, handleCallback };
