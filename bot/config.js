@@ -1,6 +1,6 @@
 module.exports = {
   // ⚠️ CHANGE THIS TOKEN - the one shown is exposed and must be revoked
-  BOT_TOKEN: '8217651077:AAEKvpdKszErIGkWrb8mruJq8CAz-gxZOXg',
+  BOT_TOKEN: '8539244180:AAGtVmWibFBe29pypQVRAk_M8GOBeWQjPLg',
   
   // Admin Telegram ID
   ADMIN_ID: 8003638877,
